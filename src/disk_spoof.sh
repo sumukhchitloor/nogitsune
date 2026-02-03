@@ -61,6 +61,7 @@ cd "$SCRIPT_DIR"
 
 # Spoof sda
 ./textreplace -f /sys/block/sda/device/model -i "VBOX HARDDISK  " -r "Samsung SSD 970" &
+./textreplace -f /sys/class/block/sda/device/model -i "VBOX HARDDISK  " -r "Samsung SSD 970" &
 DISK_PID=$!
 
 sleep 0.5
@@ -70,6 +71,7 @@ echo "✓ Disk spoofing active!"
 echo ""
 echo "Test command:"
 echo "  cat /sys/block/sda/device/model"
+echo " cat /sys/class/block/sda/device/model
 echo ""
 echo "Expected output:"
 echo "  Samsung SSD 970"

@@ -14,7 +14,7 @@ static struct env {
 } env;
 
 const char *argp_program_version = "textreplace 1.0";
-const char *argp_program_bug_address = "<path@tofile.dev>";
+const char *argp_program_bug_address = "<sumukhchitloor18@gmail.com>";
 const char argp_program_doc[] =
 "Text Replace\n"
 "\n"

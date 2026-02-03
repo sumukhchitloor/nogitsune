@@ -32,7 +32,7 @@ static struct env {
 } env;
 
 const char *argp_program_version = "pidhide 2.0 (multi-pid)";
-const char *argp_program_bug_address = "<path@tofile.dev>";
+const char *argp_program_bug_address = "<sumukhchitloor18@gmail.com>";
 const char argp_program_doc[] =
 "PID Hider (Multi-PID Version)\n"
 "\n"

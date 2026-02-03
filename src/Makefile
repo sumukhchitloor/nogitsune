@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+# Nogitsune - eBPF Anti-Sandbox Toolkit
+# Based on bad-bpf by pathtofile
+
 OUTPUT := .output
 CLANG ?= clang
 LIBBPF_SRC := $(abspath ../libbpf/src)
@@ -6,9 +9,6 @@ BPFTOOL_SRC := $(abspath ../bpftool/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
 BPFTOOL_OUTPUT ?= $(abspath $(OUTPUT)/bpftool)
 BPFTOOL ?= $(BPFTOOL_OUTPUT)/bootstrap/bpftool
-LIBBLAZESYM_SRC := $(abspath ../blazesym/)
-LIBBLAZESYM_INC := $(abspath $(LIBBLAZESYM_SRC)/capi/include)
-LIBBLAZESYM_OBJ := $(abspath $(OUTPUT)/libblazesym_c.a)
 ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' \
 			 | sed 's/arm.*/arm/' \
 			 | sed 's/aarch64/arm64/' \
@@ -17,24 +17,30 @@ ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' \
 			 | sed 's/riscv64/riscv/' \
 			 | sed 's/loongarch64/loongarch/')
 VMLINUX := ../vmlinux/$(ARCH)/vmlinux.h
-# Use our own libbpf API headers and Linux UAPI headers distributed with
-# libbpf to avoid dependency on system-wide headers, which could be missing or
-# outdated
-INCLUDES := -I$(OUTPUT) -I../libbpf/include/uapi -I$(dir $(VMLINUX)) -I$(LIBBLAZESYM_INC)
+
+# Includes
+INCLUDES := -I$(OUTPUT) -I../libbpf/include/uapi -I$(dir $(VMLINUX))
 CFLAGS := -g -Wall -std=gnu11
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS)
 
-APPS = pidhide textreplace ioctl_spoof netlink_spoof dmi_spoof meminfo_spoof cpuinfo_spoof modules_hide pci_spoof
+# ============================================================================
+# NOGITSUNE BUILD TARGETS
+# ============================================================================
+
+# BPF-based tools (have both .bpf.c and .c files)
+BPF_APPS = pidhide textreplace ioctl_spoof netlink_spoof dmi_spoof meminfo_spoof cpuinfo_spoof modules_hide pci_spoof
+
+# Pure userspace CLI (no BPF code)
+CLI_APPS = nogitsune
+
+# All applications
+APPS = $(BPF_APPS) $(CLI_APPS)
+
+# Helper binaries
 HELPERS = hijackee
 
-# Get Clang's default includes on this system. We'll explicitly add these dirs
-# to the includes list when compiling with `-target bpf` because otherwise some
-# architecture-specific dirs will be "missing" on some architectures/distros -
-# headers such as asm/types.h, asm/byteorder.h, asm/socket.h, asm/sockios.h,
-# sys/cdefs.h etc. might be missing.
-#
-# Use '-idirafter': Don't interfere with include mechanics except where the
-# build would have failed anyways.
+# ============================================================================
+
 CLANG_BPF_SYS_INCLUDES ?= $(shell $(CLANG) -v -E - </dev/null 2>&1 \
 	| sed -n '/<...> search starts here:/,/End of search list./{ s| \(/.*\)|-idirafter \1|p }')
 
@@ -61,6 +67,16 @@ $(call allow-override,LD,$(CROSS_COMPILE)ld)
 
 .PHONY: all
 all: $(APPS) $(HELPERS)
+	@echo ""
+	@echo "╔═══════════════════════════════════════════════════════════╗"
+	@echo "║         野狐 Nogitsune - Build Complete!                  ║"
+	@echo "╠═══════════════════════════════════════════════════════════╣"
+	@echo "║  Usage:                                                   ║"
+	@echo "║    sudo ./nogitsune spoof        # Load all spoofers      ║"
+	@echo "║    sudo ./nogitsune spoof --stealth  # + hide processes   ║"
+	@echo "║    sudo ./nogitsune check        # Dry run                ║"
+	@echo "║    sudo ./nogitsune status       # Show current values    ║"
+	@echo "╚═══════════════════════════════════════════════════════════╝"
 
 .PHONY: clean
 clean:
@@ -97,22 +113,47 @@ $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT) $(BPFTOOL)
 	$(call msg,GEN-SKEL,$@)
 	$(Q)$(BPFTOOL) gen skeleton $< > $@
 
-# Build user-space code
-$(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
+# Build user-space code for BPF apps (needs skeleton)
+$(patsubst %,$(OUTPUT)/%.o,$(BPF_APPS)): %.o: %.skel.h
 
 $(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,CC,$@)
 	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
 
-# Build application binary
-$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
+# Build BPF application binaries (link with libbpf)
+$(BPF_APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $^ $(ALL_LDFLAGS) -lelf -lz -o $@
+
+# ============================================================================
+# NOGITSUNE CLI - Pure userspace, no BPF
+# ============================================================================
+$(OUTPUT)/nogitsune.o: nogitsune.c $(wildcard *.h) | $(OUTPUT)
+	$(call msg,CC,$@)
+	$(Q)$(CC) $(CFLAGS) -c $< -o $@
+
+nogitsune: $(OUTPUT)/nogitsune.o
+	$(call msg,BINARY,$@)
+	$(Q)$(CC) $(CFLAGS) $^ -o $@
+
+# ============================================================================
 
 # Build helpers
 $(HELPERS):
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $@.c -o $@
+
+# Install to /usr/local/bin
+.PHONY: install
+install: all
+	@echo "Installing to /usr/local/bin..."
+	$(Q)install -m 755 $(APPS) /usr/local/bin/
+	@echo "Done!"
+
+.PHONY: uninstall
+uninstall:
+	@echo "Removing from /usr/local/bin..."
+	$(Q)rm -f $(addprefix /usr/local/bin/,$(APPS))
 
 # delete failed targets
 .DELETE_ON_ERROR:
