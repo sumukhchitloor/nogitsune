@@ -5,44 +5,41 @@
 <h1 align="center">野狐 Nogitsune</h1>
 
 <p align="center">
-  <b>eBPF-based anti-sandbox toolkit for Linux malware analysis</b>
+  <b>eBPF-based anti-sandbox toolkit for Linux</b>
 </p>
 
 <p align="center">
   <a href="#installation"><img src="https://img.shields.io/badge/Linux-5.8%2B-blue.svg" alt="Linux"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square" alt="License"></a>
   <a href="#"><img src="https://img.shields.io/badge/eBPF-libbpf-orange.svg" alt="eBPF"></a>
 </p>
 
 <p align="center">
-  <i>Make your VirtualBox VM appear as bare-metal Dell hardware to defeat evasive malware.</i>
+  <i>Make your VirtualBox VM appear as bare-metal Dell hardware.</i>
 </p>
 
 ---
 
-## 🦊 What is Nogitsune?
+## What is Nogitsune?
 
-**Nogitsune** is an eBPF-based toolkit that spoofs hardware identifiers at the kernel level, bypassing malware anti-VM/anti-sandbox detection at runtime.
+Nogitsune spoofs hardware identifiers at the kernel level using eBPF, defeating malware anti-VM detection at runtime.
 
-Unlike hypervisor patches requiring QEMU recompilation, Nogitsune works **instantly on stock Linux kernels** (5.8+).
+Unlike hypervisor patches that require QEMU recompilation, Nogitsune works instantly on any stock Linux kernel 5.8+.
 
 ```bash
-# Before: Malware detects VirtualBox and exits
+# Before: Malware detects VirtualBox and refuses to run
 $ cat /sys/class/dmi/id/sys_vendor
 innotek GmbH
 
 # After: Malware sees Dell hardware and executes
-$ sudo nogitsune spoof
-[*] Loaded: dmi_spoof, mac_spoof, cpu_spoof, mem_spoof, disk_spoof, proc_hide
-[*] VirtualBox -> Dell OptiPlex 7090
-
+$ sudo ./nogitsune spoof --stealth
 $ cat /sys/class/dmi/id/sys_vendor
 Dell Inc.
 ```
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ```bash
 # Clone with submodules
@@ -52,85 +49,80 @@ cd nogitsune/src
 # Build
 make
 
-# Run all spoofers
-sudo ./nogitsune spoof
+# Run all spoofers with process hiding
+sudo ./nogitsune spoof --stealth
 
 # Check what would be spoofed (dry run)
-sudo ./nogitsune check
+./nogitsune check
 
-# Hide analysis processes
-sudo ./nogitsune hide --name "wireshark,tcpdump,strace"
+# Hide analysis tools from malware
+sudo ./nogitsune hide --name wireshark,tcpdump,strace
 ```
 
 ---
 
-## 🎯 What It Defeats
+## Detection Coverage
 
-| Detection Technique | File/Method | Status |
-|---------------------|-------------|--------|
-| **MAC Address** | `/sys/class/net/*/address` | ✅ Spoofed |
-| **MAC via ioctl** | `SIOCGIFHWADDR` | ✅ Spoofed |
-| **DMI/SMBIOS** | `/sys/class/dmi/id/*` | ✅ Spoofed (10 files) |
-| **CPU Info** | `/proc/cpuinfo` | ✅ Spoofed (hypervisor flag removed) |
-| **Memory Size** | `/proc/meminfo` | ✅ Spoofed (2GB → 16GB) |
-| **Disk Model** | `/sys/class/block/*/device/model` | ✅ Spoofed |
-| **PCI Devices** | `/sys/bus/pci/devices/*/vendor` | ✅ Spoofed |
-| **Process List** | `getdents64` syscall | ✅ Hidden |
-| **Kernel Modules** | `/proc/modules` | ✅ Hidden |
-| **CPUID Instruction** | Hardware | ❌ Use KVM `hidden state` |
-| **RDTSC Timing** | Hardware | ❌ Use hypervisor patches |
+| Detection Technique | Target | Status |
+|---------------------|--------|--------|
+| DMI/SMBIOS strings | `/sys/class/dmi/id/*` | Spoofed (10 files) |
+| MAC address (file) | `/sys/class/net/*/address` | Spoofed |
+| MAC address (ioctl) | `SIOCGIFHWADDR` | Spoofed |
+| MAC address (netlink) | `RTM_GETLINK` | Spoofed |
+| CPU flags | `/proc/cpuinfo` | Spoofed (hypervisor removed) |
+| Memory size | `/proc/meminfo` | Spoofed (2GB to 16GB) |
+| Disk model/serial | `/sys/class/block/*/device/*` | Spoofed |
+| PCI vendor IDs | `/sys/bus/pci/devices/*/vendor` | Spoofed |
+| Process enumeration | `getdents64` on `/proc` | Hidden |
+| Kernel modules | `/proc/modules` | Hidden |
+| CPUID instruction | Hardware | Not possible with eBPF |
+| RDTSC timing | Hardware | Not possible with eBPF |
 
-### Spoofed Values (Dell OptiPlex 7090 Profile)
+### Spoofed Profile: Dell OptiPlex 7090
 
-| Field | VirtualBox | Nogitsune |
-|-------|------------|-----------|
+| Field | VirtualBox | Spoofed Value |
+|-------|------------|---------------|
 | `sys_vendor` | innotek GmbH | Dell Inc. |
 | `product_name` | VirtualBox | OptiPlex 7090 |
 | `bios_vendor` | innotek GmbH | Dell Inc. |
+| `board_vendor` | Oracle Corporation | Dell Inc. |
 | `board_name` | VirtualBox | 0WN7Y6 |
-| `MAC prefix` | 08:00:27 | a4:5e:60 |
-| `disk model` | VBOX HARDDISK | Samsung SSD 970 EVO Plus |
-| `MemTotal` | 2GB | 16GB |
-| `cpu cores` | 2 | 8 |
+| `chassis_vendor` | Oracle Corporation | Dell Inc. |
+| MAC prefix | 08:00:27 | a4:5e:60 |
+| Disk model | VBOX HARDDISK | Samsung SSD 970 EVO Plus |
+| MemTotal | 2 GB | 16 GB |
+| CPU cores | 2 | 8 |
 
 ---
 
-## 🔧 Installation
+## Installation
 
 ### Prerequisites
 
 ```bash
 # Ubuntu/Debian
-sudo apt install clang llvm libelf-dev make git
+sudo apt install clang llvm libelf-dev zlib1g-dev make git
 
 # Fedora
-sudo dnf install clang llvm elfutils-libelf-devel make git
+sudo dnf install clang llvm elfutils-libelf-devel zlib-devel make git
 
 # Arch
-sudo pacman -S clang llvm libelf make git
+sudo pacman -S clang llvm libelf zlib make git
 ```
 
-### Build from Source
+### Build
 
 ```bash
-# Clone with submodules (includes libbpf and bpftool)
 git clone --recursive https://github.com/YOUR_USERNAME/nogitsune
 cd nogitsune/src
-
-# Build everything
 make
-
-# Verify
-./nogitsune --help
 ```
 
 ### Verify Kernel Support
 
 ```bash
-# Check kernel version (need 5.8+)
+# Need kernel 5.8+ with BTF
 uname -r
-
-# Check BTF support
 ls /sys/kernel/btf/vmlinux
 ```
 
@@ -138,23 +130,40 @@ ls /sys/kernel/btf/vmlinux
 
 ## Usage
 
-### Basic Commands
+### Commands
 
 ```bash
-# Spoof all hardware identifiers
+# Load all spoofers
 sudo ./nogitsune spoof
 
-# Spoof specific components only
+# Load all spoofers + hide them from ps/top
+sudo ./nogitsune spoof --stealth
+
+# Load specific spoofers only
 sudo ./nogitsune spoof --dmi --mac --cpu
 
-# Check current values vs spoofed (dry run)
-sudo ./nogitsune check
+# Dry run - show what would be changed
+./nogitsune check
 
-# Show real system values
+# Scan system for VM indicators
 sudo ./nogitsune status
 
-# Stop all spoofers (unload eBPF programs)
+# Stop all spoofers
 sudo ./nogitsune stop
+```
+
+### Spoof Options
+
+```
+--all        Load all spoofers (default)
+--dmi        DMI/SMBIOS files
+--mac        MAC address (all three methods)
+--cpu        /proc/cpuinfo
+--mem        /proc/meminfo
+--pci        PCI device vendor IDs
+--disk       Disk model and serial
+--modules    Hide vbox kernel modules
+--stealth    Hide spoofer processes from /proc
 ```
 
 ### Process Hiding
@@ -164,143 +173,155 @@ sudo ./nogitsune stop
 sudo ./nogitsune hide --pid 1234,5678
 
 # Hide by process name
-sudo ./nogitsune hide --name "wireshark,tcpdump,strace,gdb"
+sudo ./nogitsune hide --name wireshark,tcpdump,strace,gdb
 
-# Hide self (the nogitsune process)
+# Hide self
 sudo ./nogitsune hide --self
 ```
 
-### Running Individual Spoofers
+### Individual Tools
 
-Each spoofer can also run standalone:
+Each spoofer can run standalone:
 
 ```bash
-# DMI/SMBIOS only
-sudo ./dmi_spoof
-
-# MAC address only  
-sudo ./textreplace -f /sys/class/net/eth0/address -i "08:00:27" -r "a4:5e:60"
-
-# CPU info only
-sudo ./cpuinfo_spoof
-
-# Memory info only
-sudo ./meminfo_spoof
-
-# Process hiding
-sudo ./processhide --pid 1234
+sudo ./dmi_spoof          # DMI/SMBIOS
+sudo ./cpuinfo_spoof      # /proc/cpuinfo
+sudo ./meminfo_spoof      # /proc/meminfo
+sudo ./ioctl_spoof        # MAC via ioctl
+sudo ./netlink_spoof      # MAC via netlink
+sudo ./pci_spoof          # PCI vendor IDs
+sudo ./pidhide -n sshd    # Hide processes by name
+sudo ./pidhide -p 1234    # Hide processes by PID
 ```
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Space                              │
-│                                                                 │
-│  ┌─────────────┐         ┌────────────────────────────────────┐ │
-│  │   Malware   │         │         nogitsune CLI              │ │
-│  │             │         │                                    │ │
-│  │ read() ─────┼────┐    │  • Loads eBPF programs             │ │
-│  │ getdents64()│    │    │  • Configures spoof values         │ │
-│  └─────────────┘    │    │  • Manages process hiding          │ │
-│                     │    └────────────────────────────────────┘ │
-├─────────────────────┼───────────────────────────────────────────┤
-│                     │        Kernel Space                       │
-│                     ▼                                           │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    eBPF Programs                            ││
-│  │                                                             ││
-│  │   tracepoint/syscalls/sys_exit_read                         ││
-│  │   ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐           ││
-│  │   │  MAC    │ │  DMI    │ │  CPU    │ │  MEM    │           ││
-│  │   │ Spoof   │ │ Spoof   │ │ Spoof   │ │ Spoof   │           ││
-│  │   └─────────┘ └─────────┘ └─────────┘ └─────────┘           ││
-│  │                                                             ││
-│  │   tracepoint/syscalls/sys_exit_getdents64                   ││
-│  │   ┌─────────────┐                                           ││
-│  │   │ Process     │  Filters directory entries                ││
-│  │   │ Hider       │  to hide PIDs from /proc                  ││
-│  │   └─────────────┘                                           ││
-│  │                                                             ││
-│  │   Hook: bpf_probe_write_user() modifies buffer contents     ││
-│  └─────────────────────────────────────────────────────────────┘│
-│                                                                 │
-│  Target Files:                                                  │
-│  /sys/class/net/*/address    /sys/class/dmi/id/*                │
-│  /proc/cpuinfo               /proc/meminfo                      │
-│  /sys/class/block/*/device/* /proc/<pid>                        │
-└─────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                              USER SPACE                                    │
+│                                                                            │
+│   ┌──────────────┐                      ┌────────────────────────────────┐ │
+│   │              │   read("/sys/...")   │                                │ │
+│   │   Malware    │──────────────────────│         nogitsune CLI          │ │
+│   │              │   getdents64("/proc")│                                │ │
+│   │  (victim)    │◄─────────────────────│   Orchestrates all spoofers    │ │
+│   │              │   spoofed response   │   Manages process hiding       │ │
+│   └──────────────┘                      └────────────────────────────────┘ │
+│                                                       │                    │
+│         ▲ Sees spoofed data                          │ loads               │
+│         │                                             ▼                    │
+├─────────┼──────────────────────────────────────────────────────────────────┤
+│         │                      KERNEL SPACE                                │
+│         │                                                                  │
+│   ┌─────┴──────────────────────────────────────────────────────────────┐   │
+│   │                         eBPF PROGRAMS                              │   │
+│   │                                                                    │   │
+│   │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│   │  │ tracepoint/syscalls/sys_exit_read                           │   │   │
+│   │  │                                                             │   │   │
+│   │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌──────────┐  │   │   │
+│   │  │  │ dmi_spoof  │ │  cpuinfo   │ │  meminfo   │ │pci_spoof │  │   │   │
+│   │  │  │            │ │  _spoof    │ │  _spoof    │ │          │  │   │   │
+│   │  │  │ 10 DMI     │ │ hypervisor │ │ MemTotal   │ │ vendor   │  │   │   │
+│   │  │  │ files      │ │ flag+cores │ │ 16GB       │ │ IDs      │  │   │   │
+│   │  │  └────────────┘ └────────────┘ └────────────┘ └──────────┘  │   │   │
+│   │  │                                                             │   │   │
+│   │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐               │   │   │
+│   │  │  │   ioctl    │ │  netlink   │ │ textreplace│               │   │   │
+│   │  │  │  _spoof    │ │  _spoof    │ │ (mac file) │               │   │   │
+│   │  │  │            │ │            │ │            │               │   │   │
+│   │  │  │ MAC ioctl  │ │ MAC rtnetl │ │ /sys/net/* │               │   │   │
+│   │  │  └────────────┘ └────────────┘ └────────────┘               │   │   │
+│   │  └─────────────────────────────────────────────────────────────┘   │   │
+│   │                                                                    │   │
+│   │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│   │  │ tracepoint/syscalls/sys_exit_getdents64                     │   │   │
+│   │  │                                                             │   │   │
+│   │  │  ┌────────────────────────────────────────────────────────┐ │   │   │
+│   │  │  │                      pidhide                           │ │   │   │
+│   │  │  │                                                        │ │   │   │
+│   │  │  │  Intercepts directory listing of /proc                 │ │   │   │
+│   │  │  │  Removes entries for hidden PIDs                       │ │   │   │
+│   │  │  │  Malware running "ps aux" won't see hidden processes   │ │   │   │
+│   │  │  └────────────────────────────────────────────────────────┘ │   │   │
+│   │  └─────────────────────────────────────────────────────────────┘   │   │
+│   │                                                                    │   │
+│   │  Method: bpf_probe_write_user() modifies buffer after kernel       │   │
+│   │          fills it but before data returns to userspace             │   │
+│   └────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+│   Target Files:                                                            │
+│   /sys/class/dmi/id/*           /sys/class/net/*/address                   │
+│   /proc/cpuinfo                 /proc/meminfo                              │
+│   /sys/bus/pci/devices/*/vendor /sys/class/block/*/device/model            │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### How It Works
 
-1. **Tracepoint Hooks**: Attach to `sys_exit_read` (after kernel fills buffer)
-2. **Filename Tracking**: Track which file is being read via `sys_enter_read`  
-3. **Content Replacement**: Use `bpf_probe_write_user()` to modify buffer
-4. **Process Hiding**: Hook `getdents64` to filter `/proc` directory entries
+1. **Hook Point**: eBPF programs attach to `tracepoint/syscalls/sys_exit_read`
+2. **Timing**: Hooks fire *after* the kernel fills the read buffer but *before* returning to userspace
+3. **File Tracking**: `sys_enter_read` tracks which file descriptor maps to which path
+4. **Modification**: `bpf_probe_write_user()` overwrites buffer contents with spoofed values
+5. **Process Hiding**: `pidhide` hooks `getdents64` and removes directory entries from `/proc`
+
+The original files on disk are never modified. Spoofing happens entirely in memory during the syscall.
 
 ### Why eBPF?
 
-| Approach | Requires | Runtime | Stealth |
-|----------|----------|---------|---------|
-| QEMU Patches | Recompilation | Static | High |
-| Kernel Module | Custom build | Load/unload | Medium |
-| **eBPF** | Stock kernel 5.8+ | Instant | High |
+| Approach | Requires | Deployment | Detectability |
+|----------|----------|------------|---------------|
+| QEMU patches | Source recompilation | Complex | Low |
+| Kernel module | Custom kernel build | Medium | Medium |
+| eBPF | Stock kernel 5.8+ | Instant | Low |
+
 
 ---
 
-## 🔬 For Security Researchers
+## Limitations
 
-### Testing Against VMAware
+eBPF operates at the syscall level. It cannot intercept:
 
-```bash
-# Clone and build VMAware
-git clone https://github.com/kernelwernel/VMAware
-cd VMAware && mkdir build && cd build
-cmake .. && make
+- **CPUID instructions** - Executed directly by CPU, no syscall involved
+- **RDTSC timing attacks** - Hardware instruction, cannot be hooked
+- **MSR reads** - Requires hypervisor-level interception
+- **Hardware enumeration** - Direct port I/O
 
-# Run without Nogitsune
-./vmaware
-
-# Run WITH Nogitsune
-cd /path/to/nogitsune/src
-sudo ./nogitsune spoof &
-./vmaware  # Should show fewer detections
-```
-
-
-## References & Credits
-
-### Built On
-- [bad-bpf](https://github.com/pathtofile/bad-bpf)
-- [VMAware](https://github.com/kernelwernel/VMAware)
-- [libbpf](https://github.com/libbpf/libbpf)
-
-
-## Legal Disclaimer
-
-This tool is for **authorized security research only**:
-
-- ✅ Malware analysis in controlled environments
-- ✅ Security testing with proper authorization
-- ✅ Educational purposes
-
-**NOT** for:
-- ❌ Evading detection on systems you don't own
-- ❌ Malicious purposes
-
-The authors are not responsible for misuse.
+For complete transparency against sophisticated malware, combine Nogitsune with:
+- KVM `hidden state` configuration
+- QEMU anti-detection patches
+- Custom SMBIOS in libvirt XML
 
 ---
 
-## 📜 License
+## Credits
 
-MIT License - See [LICENSE](LICENSE) for details.
+- [bad-bpf](https://github.com/pathtofile/bad-bpf) - Foundation and eBPF techniques
+- [libbpf](https://github.com/libbpf/libbpf) - eBPF library
+- [VMAware](https://github.com/kernelwernel/VMAware) - VM detection testing
+
+---
+
+## Disclaimer
+
+This tool is for authorized security research only:
+
+- Malware analysis in controlled lab environments
+- Security testing with proper authorization  
+- Educational purposes
+
+Not for evading detection on systems you don't own.
+
+---
+
+## License
+
+BSD 3-Clause License - See [LICENSE](LICENSE) for details.
 
 ---
 
 <p align="center">
-  <b>Nogitsune</b> - The wild fox that tricks malware<br>
+  <b>野狐 Nogitsune</b> - The wild fox that tricks malware
 </p>

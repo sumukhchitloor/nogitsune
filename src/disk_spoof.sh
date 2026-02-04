@@ -17,8 +17,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Kill any existing textreplace instances
-pkill -9 textreplace 2>/dev/null || true
+# # Kill any existing textreplace instances
+# pkill -9 textreplace 2>/dev/null || true
 
 echo "[*] Starting disk model spoofer..."
 echo ""

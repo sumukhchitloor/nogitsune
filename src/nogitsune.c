@@ -188,7 +188,7 @@
      printf(BWHITE "    ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚═╝   ╚═╝   ╚══════╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝\n" RESET);
      printf("\n");
      printf(DIM "                        ╭──────────────────────────────────╮\n" RESET);
-     printf(DIM "                        │" RESET BOLD "  野狐 " RESET CYAN "eBPF Anti-Sandbox Toolkit" DIM "  │\n" RESET);
+     printf(DIM "                        │" RESET BOLD "  野狐 " RESET CYAN "eBPF Anti-Sandbox Toolkit" DIM "     │\n" RESET);
      printf(DIM "                        │" RESET "     Make VMs Look Like Metal     " DIM "│\n" RESET);
      printf(DIM "                        ╰──────────────────────────────────╯\n" RESET);
      printf("\n");
@@ -198,7 +198,7 @@
  {
      printf("\n");
      printf(BYELLOW "  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n" RESET);
-     printf(BYELLOW "  ┃" RESET BOLD " 野狐 " BRED "NOGITSUNE" RESET " ━ eBPF Anti-Sandbox Toolkit        " BYELLOW "┃\n" RESET);
+     printf(BYELLOW "  ┃" RESET BOLD " 野狐 " BRED "NOGITSUNE" RESET " ━ eBPF Anti-Sandbox Toolkit        " BYELLOW "   ┃\n" RESET);
      printf(BYELLOW "  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n" RESET);
      printf("\n");
  }
@@ -478,21 +478,24 @@
      };
      
      for (int i = 0; net_paths[i] != NULL; i++) {
-         char *mac = read_file_line(net_paths[i]);
-         if (mac) {
-             total_checks++;
-             char ifname[32];
-             const char *p = net_paths[i] + 16;  /* Skip /sys/class/net/ */
-             sscanf(p, "%[^/]", ifname);
-             
-             if (strncmp(mac, "08:00:27", 8) == 0) {
-                 printf("      " RED "[✗]" RESET " %-16s " RED "%-20s" RESET " " DIM "← VirtualBox OUI" RESET "\n", ifname, mac);
-                 vm_indicators++;
-             } else {
-                 printf("      " GREEN "[✓]" RESET " %-16s " GREEN "%s" RESET "\n", ifname, mac);
-             }
-         }
-     }
+        char *mac = read_file_line(net_paths[i]);
+        if (mac) {
+            total_checks++;
+            
+            // Extract interface name: "/sys/class/net/eth0/address" -> "eth0"
+            char ifname[32];
+            if (sscanf(net_paths[i], "/sys/class/net/%31[^/]", ifname) != 1) {
+                strcpy(ifname, "unknown");
+            }
+            
+            if (strncmp(mac, "08:00:27", 8) == 0) {
+                printf("      " RED "[✗]" RESET " %-16s " RED "%-20s" RESET " " DIM "← VirtualBox OUI" RESET "\n", ifname, mac);
+                vm_indicators++;
+            } else {
+                printf("      " GREEN "[✓]" RESET " %-16s " GREEN "%s" RESET "\n", ifname, mac);
+            }
+        }
+    }
      
      /* CPU info */
      printf("\n" BOLD "  CPU:\n" RESET);
