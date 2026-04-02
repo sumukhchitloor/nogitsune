@@ -43,7 +43,7 @@ Dell Inc.
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/YOUR_USERNAME/nogitsune
+git clone --recursive https://github.com/sumukhchitloor/nogitsune
 cd nogitsune/src
 
 # Build
@@ -113,7 +113,7 @@ sudo pacman -S clang llvm libelf zlib make git
 ### Build
 
 ```bash
-git clone --recursive https://github.com/YOUR_USERNAME/nogitsune
+git clone --recursive https://github.com/sumukhchitloor/nogitsune
 cd nogitsune/src
 make
 ```
