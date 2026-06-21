@@ -98,7 +98,7 @@ sudo ./nogitsune hide --name wireshark,tcpdump,strace
 | Process enumeration | `getdents64` on `/proc` | Hidden |
 | Guest Additions process names (`VBoxService`, etc.) | `ps`/`/proc` | Hidden (auto, in `--stealth`) |
 | Guest Additions files (directory listing) | `ls`/`find` on `/opt`, kernel module dirs, etc. | Hidden |
-| Guest Additions files (direct probe) | `open()`/`stat()`/`access()` on known paths | Denied (BPF LSM) |
+| Guest Additions files (direct probe, incl. symlinks like `/usr/sbin/VBoxService`) | `open()`/`stat()`/`access()` on known paths | Denied (BPF LSM, resolves symlink targets too) |
 | Kernel modules | `/proc/modules` | Hidden |
 | Live kernel log | `/dev/kmsg`, legacy `syslog()` | Sanitized (live reads only - see Known Limitations) |
 | CPUID instruction | Hardware | Not possible with eBPF |
@@ -317,6 +317,10 @@ defaults shown above.
 
 ## Architecture
 
+This section is the quick mental model. For the full technical reference - every hook
+point, every BPF map, the verifier bugs actually hit and fixed during development, and
+a per-tool breakdown of all 16 BPF programs - see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                              USER SPACE                                    │
@@ -326,68 +330,74 @@ defaults shown above.
 │   │   Malware    │──────────────────────│         nogitsune CLI          │ │
 │   │              │   getdents64("/proc")│                                │ │
 │   │  (victim)    │◄─────────────────────│   Orchestrates all spoofers    │ │
-│   │              │   spoofed response   │   Manages process hiding       │ │
-│   └──────────────┘                      └────────────────────────────────┘ │
+│   │              │   open()/stat()/...  │   Manages process hiding       │ │
+│   │              │   spoofed response   │                                │ │
+│   └──────────────┘   or ENOENT denial   └────────────────────────────────┘ │
 │                                                       │                    │
-│         ▲ Sees spoofed data                          │ loads               │
+│         ▲ Sees spoofed/denied result                 │ loads               │
 │         │                                             ▼                    │
 ├─────────┼──────────────────────────────────────────────────────────────────┤
 │         │                      KERNEL SPACE                                │
 │         │                                                                  │
 │   ┌─────┴──────────────────────────────────────────────────────────────┐   │
-│   │                         eBPF PROGRAMS                              │   │
+│   │                         eBPF PROGRAMS (one process per spoofer)    │   │
 │   │                                                                    │   │
 │   │  ┌─────────────────────────────────────────────────────────────┐   │   │
-│   │  │ tracepoint/syscalls/sys_exit_read                           │   │   │
+│   │  │ tracepoint/syscalls/sys_exit_read - REWRITE buffer contents │   │   │
 │   │  │                                                             │   │   │
-│   │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌──────────┐  │   │   │
-│   │  │  │ dmi_spoof  │ │  cpuinfo   │ │  meminfo   │ │pci_spoof │  │   │   │
-│   │  │  │ (or device-│ │  _spoof    │ │  _spoof    │ │          │  │   │   │
-│   │  │  │ tree_spoof)│ │ hypervisor │ │ MemTotal   │ │ vendor   │  │   │   │
-│   │  │  │ 12 DMI     │ │ flag+cores │ │ (config-   │ │ IDs      │  │   │   │
-│   │  │  │ files      │ │ (x86 only) │ │ urable)    │ │          │  │   │   │
-│   │  │  └────────────┘ └────────────┘ └────────────┘ └──────────┘  │   │   │
-│   │  │                                                             │   │   │
-│   │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐               │   │   │
-│   │  │  │   ioctl    │ │  netlink   │ │ textreplace│               │   │   │
-│   │  │  │  _spoof    │ │  _spoof    │ │ (mac file) │               │   │   │
-│   │  │  │            │ │            │ │            │               │   │   │
-│   │  │  │ MAC ioctl  │ │ MAC rtnetl │ │ /sys/net/* │               │   │   │
-│   │  │  └────────────┘ └────────────┘ └────────────┘               │   │   │
+│   │  │  dmi_spoof/devicetree_spoof  cpuinfo_spoof   meminfo_spoof  │   │   │
+│   │  │  pci_spoof   modules_hide   uptime_spoof   kmsg_spoof       │   │   │
+│   │  │  textreplace (MAC file, disk model)                        │   │   │
 │   │  └─────────────────────────────────────────────────────────────┘   │   │
 │   │                                                                    │   │
 │   │  ┌─────────────────────────────────────────────────────────────┐   │   │
-│   │  │ tracepoint/syscalls/sys_exit_getdents64                     │   │   │
-│   │  │                                                             │   │   │
-│   │  │  ┌────────────────────────────────────────────────────────┐ │   │   │
-│   │  │  │                      pidhide                           │ │   │   │
-│   │  │  │                                                        │ │   │   │
-│   │  │  │  Intercepts directory listing of /proc                 │ │   │   │
-│   │  │  │  Removes entries for hidden PIDs                       │ │   │   │
-│   │  │  │  Malware running "ps aux" won't see hidden processes   │ │   │   │
-│   │  │  └────────────────────────────────────────────────────────┘ │   │   │
+│   │  │ sys_enter_ioctl / sys_enter_recvmsg - REWRITE struct fields │   │   │
+│   │  │  ioctl_spoof (SIOCGIFHWADDR)   netlink_spoof (RTM_NEWLINK)  │   │   │
 │   │  └─────────────────────────────────────────────────────────────┘   │   │
 │   │                                                                    │   │
-│   │  Method: bpf_probe_write_user() modifies buffer after kernel       │   │
-│   │          fills it but before data returns to userspace             │   │
+│   │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│   │  │ tracepoint/syscalls/sys_exit_getdents64 - SPLICE dirents    │   │   │
+│   │  │  pidhide (hide PIDs from /proc)                            │   │   │
+│   │  │  fshide  (hide filename prefixes from any directory)       │   │   │
+│   │  └─────────────────────────────────────────────────────────────┘   │   │
+│   │                                                                    │   │
+│   │  ┌─────────────────────────────────────────────────────────────┐   │   │
+│   │  │ lsm/file_open, lsm/inode_getattr, lsm/inode_permission      │   │   │
+│   │  │  pathdeny - DENY open/stat/access on exact paths (ENOENT)   │   │   │
+│   │  └─────────────────────────────────────────────────────────────┘   │   │
+│   │                                                                    │   │
+│   │  Also: sys_enter_sched_getaffinity (cpucount_spoof)                │   │
 │   └────────────────────────────────────────────────────────────────────┘   │
 │                                                                            │
 │   Target Files:                                                            │
-│   /sys/class/dmi/id/*           /sys/class/net/*/address                   │
-│   /proc/cpuinfo                 /proc/meminfo                              │
-│   /sys/bus/pci/devices/*/vendor /sys/class/block/*/device/model            │
+│   /sys/class/dmi/id/*  /proc/device-tree/*  /sys/class/net/*/address       │
+│   /proc/cpuinfo  /proc/meminfo  /proc/uptime  /dev/kmsg  /proc/modules     │
+│   /sys/bus/pci/devices/*/vendor  /sys/class/block/*/device/model           │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### How It Works
 
-1. **Hook Point**: eBPF programs attach to `tracepoint/syscalls/sys_exit_read`
-2. **Timing**: Hooks fire *after* the kernel fills the read buffer but *before* returning to userspace
-3. **File Tracking**: `sys_enter_read` tracks which file descriptor maps to which path
-4. **Modification**: `bpf_probe_write_user()` overwrites buffer contents with spoofed values
-5. **Process Hiding**: `pidhide` hooks `getdents64` and removes directory entries from `/proc`
+Three distinct interception techniques, depending on what's being defeated (full
+breakdown with code-level detail in [docs/ARCHITECTURE.md §2](docs/ARCHITECTURE.md#2-the-three-interception-techniques)):
 
-The original files on disk are never modified. Spoofing happens entirely in memory during the syscall.
+1. **Read-buffer rewriting** (most spoofers) - hooks fire *after* the kernel fills a
+   `read()` buffer with the real file content but *before* it returns to userspace;
+   `bpf_probe_write_user()` overwrites the buffer in place with spoofed bytes,
+   tracked across the `open()`/`read()`/`close()` syscall sequence by per-PID BPF hash
+   maps so the right buffer gets rewritten for the right file.
+2. **Directory-listing splicing** (`pidhide`, `fshide`) - hooks `getdents64()` and
+   surgically removes individual entries from the returned directory-listing buffer by
+   re-pointing the previous entry's record length to skip over the hidden one, so
+   `ls`/`find`/`ps` never see it at all.
+3. **BPF LSM deny hooks** (`pathdeny`) - intercepts the kernel's *permission-check*
+   layer directly (`lsm/file_open`, `lsm/inode_getattr`, `lsm/inode_permission`) and
+   returns `-ENOENT` for configured paths, making `open()`/`stat()`/`access()` behave
+   exactly as if the path never existed - including for the real target of a symlink
+   like `/usr/sbin/VBoxService` (see Known Limitations below).
+
+The original files on disk are never modified in any of the three. Spoofing happens
+entirely in memory during the syscall.
 
 ### Why eBPF?
 
@@ -446,6 +456,18 @@ A few deliberate simplifications, documented here rather than silently presented
   dynamically regardless of when a path appears. `pathdeny` itself needs `CONFIG_BPF_LSM`
   + `bpf` active in `/sys/kernel/security/lsm` - if unavailable, it exits cleanly without
   affecting any other spoofer.
+- **`pathdeny` also resolves and covers each configured path's real target if it's a
+  symlink.** Real VirtualBox Guest Additions installs put `/usr/sbin/VBoxService` and
+  friends as symlinks into a version-suffixed `/opt/VBoxGuestAdditions-X.Y.Z/...`
+  directory - and the kernel resolves that symlink *before* `pathdeny`'s `open()`/`stat()`
+  hooks ever see the path, unless the caller passes `O_NOFOLLOW`/`AT_SYMLINK_NOFOLLOW`
+  (almost nothing does). Without resolving the target too, any `open()`/`stat()` that
+  follows the symlink - which is the default, and what `cat`, `stat()`, and
+  `nogitsune status`'s own check all do - would see straight through. `pathdeny` now
+  resolves each configured path's target via `realpath()` once at startup and denies
+  both the symlink and the resolved target - see
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2c-bpf-lsm-deny-hooks-pathdeny) for the
+  full technical breakdown of how this was found and fixed.
 - **`cpucount_spoof` only covers `sched_getaffinity()`** (what `nproc`'s default behavior
   checks) - `/sys/devices/system/cpu/*` and `/proc/cpuinfo`'s processor-line count (what
   `nproc --all` uses, and the only thing ARM64 even has) are separate, unaddressed code

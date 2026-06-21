@@ -214,6 +214,16 @@ at startup, since the kernel hook for `access()` has no path string available at
 path string to match against, and those two work dynamically regardless of when the path
 appeared).
 
+**Symlinks are resolved automatically.** If a configured path is a symlink (the real
+case for VirtualBox's `/usr/sbin/VBoxService` and friends, which point into a
+version-suffixed `/opt/VBoxGuestAdditions-X.Y.Z/...`), `pathdeny` also resolves and
+denies its real target via `realpath()` at startup - without this, any `open()`/`stat()`
+that follows the symlink (the default behavior for essentially every caller, including
+`cat` and `nogitsune status`'s own check) would resolve straight through to the real
+file before `pathdeny`'s path-string hooks ever see it. See
+[ARCHITECTURE.md §2.C](ARCHITECTURE.md#2c-bpf-lsm-deny-hooks-pathdeny) for the full
+technical explanation.
+
 | Key | Type | Default |
 |---|---|---|
 | `hidden_paths` | array of strings (exact match) | `["/usr/sbin/VBoxService", "/usr/bin/VBoxClient", "/usr/bin/VBoxControl", "/usr/sbin/mount.vboxsf"]` |
