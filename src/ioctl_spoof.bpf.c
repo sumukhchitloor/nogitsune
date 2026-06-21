@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_core_read.h>
-#include <bpf/bpf_tracing.h>
 
 #define SIOCGIFHWADDR 0x8927
 #define IFNAMSIZ 16
 
-// Target interface to spoof
-const char target_iface[IFNAMSIZ] = "eth0";
+#if NOGITSUNE_DEBUG
+#define log_bpf(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define log_bpf(fmt, ...)
+#endif
+
+// Target interface to spoof. Must be const VOLATILE, not plain const - a
+// plain const global can be constant-folded by the compiler at -O2, which
+// would silently ignore any userspace override written into rodata before
+// load.
+const volatile char target_iface[IFNAMSIZ] = "eth0";
 
 // Fake MAC address (Dell OUI: a4:5e:60:xx:xx:xx)
-const unsigned char fake_mac[6] = {0xa4, 0x5e, 0x60, 0x12, 0x34, 0x56};
+const volatile unsigned char fake_mac[6] = {0xa4, 0x5e, 0x60, 0x12, 0x34, 0x56};
 
 // Ring buffer for logging events
 struct {
@@ -38,37 +45,32 @@ struct {
     __type(value, unsigned long);
 } pending_ioctls SEC(".maps");
 
-SEC("kprobe/__x64_sys_ioctl")
-int BPF_KPROBE(ioctl_entry, struct pt_regs *regs)
+SEC("tp/syscalls/sys_enter_ioctl")
+int ioctl_entry(struct trace_event_raw_sys_enter *ctx)
 {
-    // For __x64_sys_ioctl, parameters are in pt_regs structure
-    // regs->di = fd
-    // regs->si = cmd
-    // regs->dx = arg (ifreq pointer)
+    // args[0]=fd, args[1]=cmd, args[2]=arg
+    unsigned int cmd = (unsigned int)ctx->args[1];
+    unsigned long arg = (unsigned long)ctx->args[2];
     
-    unsigned int cmd = (unsigned int)PT_REGS_PARM2_CORE(regs);  // cmd from rsi
-    unsigned long arg = (unsigned long)PT_REGS_PARM3_CORE(regs); // arg from rdx
+    log_bpf("ioctl called: cmd=0x%x SIOCGIFHWADDR=0x%x", cmd, SIOCGIFHWADDR);
     
-    bpf_printk("ioctl called: cmd=0x%x SIOCGIFHWADDR=0x%x", cmd, SIOCGIFHWADDR);
-    
-    // Check if this is SIOCGIFHWADDR (get hardware address)
     if (cmd != SIOCGIFHWADDR) {
         return 0;
     }
     
-    bpf_printk("SIOCGIFHWADDR detected! arg=0x%lx", arg);
+    log_bpf("SIOCGIFHWADDR detected! arg=0x%lx", arg);
     
-    // Store the ifreq pointer for the return probe
     u64 pid_tgid = bpf_get_current_pid_tgid();
     bpf_map_update_elem(&pending_ioctls, &pid_tgid, &arg, BPF_ANY);
     
     return 0;
 }
 
-SEC("kretprobe/__x64_sys_ioctl")
-int BPF_KRETPROBE(ioctl_exit, int ret)
+SEC("tp/syscalls/sys_exit_ioctl")
+int ioctl_exit(struct trace_event_raw_sys_exit *ctx)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
+    long ret = ctx->ret;
     
     // Check if this was a SIOCGIFHWADDR call we're tracking
     unsigned long *arg_ptr = bpf_map_lookup_elem(&pending_ioctls, &pid_tgid);
@@ -81,7 +83,7 @@ int BPF_KRETPROBE(ioctl_exit, int ret)
     
     // Only modify if ioctl succeeded
     if (ret < 0) {
-        bpf_printk("ioctl failed with ret=%d, skipping", ret);
+        log_bpf("ioctl failed with ret=%d, skipping", ret);
         return 0;
     }
     
@@ -98,11 +100,11 @@ int BPF_KRETPROBE(ioctl_exit, int ret)
     // Read interface name to verify it's our target
     char iface_name[IFNAMSIZ] = {};
     if (bpf_probe_read_user(iface_name, IFNAMSIZ, (void *)arg) < 0) {
-        bpf_printk("Failed to read interface name");
+        log_bpf("Failed to read interface name");
         return 0;
     }
     
-    bpf_printk("Interface: %s", iface_name);
+    log_bpf("Interface: %s", iface_name);
     
     // Check if this is the target interface (eth0)
     bool is_target = true;
@@ -114,28 +116,28 @@ int BPF_KRETPROBE(ioctl_exit, int ret)
     }
     
     if (!is_target) {
-        bpf_printk("Not target interface, skipping");
+        log_bpf("Not target interface, skipping");
         return 0;
     }
     
-    bpf_printk("Target interface matched! Spoofing MAC...");
+    log_bpf("Target interface matched! Spoofing MAC...");
     
     // Read original MAC address for logging
     unsigned char original_mac[6] = {};
     unsigned long mac_offset = arg + 18; // ifr_name(16) + sa_family(2)
     bpf_probe_read_user(original_mac, 6, (void *)mac_offset);
     
-    bpf_printk("Original MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+    log_bpf("Original MAC: %02x:%02x:%02x:%02x:%02x:%02x",
                original_mac[0], original_mac[1], original_mac[2],
                original_mac[3], original_mac[4], original_mac[5]);
     
     // Write fake MAC address
-    if (bpf_probe_write_user((void *)mac_offset, fake_mac, 6) < 0) {
-        bpf_printk("Failed to write fake MAC!");
+    if (bpf_probe_write_user((void *)mac_offset, (void *)fake_mac, 6) < 0) {
+        log_bpf("Failed to write fake MAC!");
         return 0;
     }
     
-    bpf_printk("Spoofed MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+    log_bpf("Spoofed MAC: %02x:%02x:%02x:%02x:%02x:%02x",
                fake_mac[0], fake_mac[1], fake_mac[2],
                fake_mac[3], fake_mac[4], fake_mac[5]);
     
@@ -146,7 +148,7 @@ int BPF_KRETPROBE(ioctl_exit, int ret)
         bpf_get_current_comm(&event->comm, sizeof(event->comm));
         __builtin_memcpy(event->iface, iface_name, IFNAMSIZ);
         __builtin_memcpy(event->original_mac, original_mac, 6);
-        __builtin_memcpy(event->spoofed_mac, fake_mac, 6);
+        __builtin_memcpy(event->spoofed_mac, (void *)fake_mac, 6);
         event->success = true;
         bpf_ringbuf_submit(event, 0);
     }

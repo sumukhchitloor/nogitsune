@@ -7,6 +7,12 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
+#if NOGITSUNE_DEBUG
+#define log_bpf(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define log_bpf(fmt, ...)
+#endif
+
 // Ringbuffer Map to pass messages from kernel to user
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -111,7 +117,7 @@ int handle_openat_enter(struct trace_event_raw_sys_enter *ctx)
     unsigned int zero = 0;
     bpf_map_update_elem(&map_fds, &pid_tgid, &zero, BPF_ANY);
 
-    bpf_printk("[TEXT_REPLACE] PID %d Filename %s\n", pid, filename);
+    log_bpf("[TEXT_REPLACE] PID %d Filename %s\n", pid, filename);
     return 0;
 }
 
@@ -157,8 +163,8 @@ int handle_read_enter(struct trace_event_raw_sys_enter *ctx)
 
     // log and exit
     size_t buff_size = (size_t)ctx->args[2];
-    bpf_printk("[TEXT_REPLACE] PID %d | fd %d | buff_addr 0x%lx\n", pid, fd, buff_addr);
-    bpf_printk("[TEXT_REPLACE] PID %d | fd %d | buff_size %lu\n", pid, fd, buff_size);
+    log_bpf("[TEXT_REPLACE] PID %d | fd %d | buff_addr 0x%lx\n", pid, fd, buff_addr);
+    log_bpf("[TEXT_REPLACE] PID %d | fd %d | buff_size %lu\n", pid, fd, buff_size);
     return 0;
 }
 
@@ -184,7 +190,7 @@ int find_possible_addrs(struct trace_event_raw_sys_exit *ctx)
     }
     long unsigned int read_size = ctx->ret;
 
-    bpf_printk("[TEXT_REPLACE] PID %d | read_size %lu | buff_addr 0x%lx\n", pid, read_size, buff_addr);
+    log_bpf("[TEXT_REPLACE] PID %d | read_size %lu | buff_addr 0x%lx\n", pid, read_size, buff_addr);
     char local_buff[LOCAL_BUFF_SIZE] = { 0x00 };
 
     if (read_size > (LOCAL_BUFF_SIZE+1)) {
@@ -198,6 +204,13 @@ int find_possible_addrs(struct trace_event_raw_sys_exit *ctx)
     // the program complexity and size low enough the pass the verifier checks
     unsigned int tofind_counter = 0;
     for (unsigned int i = 0; i < LOCAL_BUFF_SIZE; i++) {
+        // Re-clamp read_size right at the call site: the verifier loses the
+        // bound established above once this value has been reloaded from
+        // the stack across the loop's back-edge, and rejects the helper
+        // call below with "R2 unbounded memory access" without this.
+        if (read_size > LOCAL_BUFF_SIZE) {
+            read_size = LOCAL_BUFF_SIZE;
+        }
         // Read in chunks from buffer
         bpf_probe_read(&local_buff, read_size, (void*)buff_addr);
         for (unsigned int j = 0; j < LOCAL_BUFF_SIZE; j++) {
@@ -215,7 +228,7 @@ int find_possible_addrs(struct trace_event_raw_sys_exit *ctx)
     }
 
     // Tail-call into 'check_possible_addrs' to loop over possible addresses
-    bpf_printk("[TEXT_REPLACE] PID %d | tofind_counter %d \n", pid, tofind_counter);
+    log_bpf("[TEXT_REPLACE] PID %d | tofind_counter %d \n", pid, tofind_counter);
 
     bpf_tail_call(ctx, &map_prog_array, PROG_01);
     return 0;
@@ -317,7 +330,7 @@ int overwrite_addresses(struct trace_event_raw_sys_exit *ctx) {
             bpf_get_current_comm(&e->comm, sizeof(e->comm));
             bpf_ringbuf_submit(e, 0);
         }
-        bpf_printk("[TEXT_REPLACE] PID %d | [*] replaced: %s\n", pid, text_find);
+        log_bpf("[TEXT_REPLACE] PID %d | [*] replaced: %s\n", pid, text_find);
         
         // Clean up map now we're done
         bpf_map_delete_elem(&map_to_replace_addrs, &match_counter);

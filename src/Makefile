@@ -16,7 +16,10 @@ ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' \
 			 | sed 's/mips.*/mips/' \
 			 | sed 's/riscv64/riscv/' \
 			 | sed 's/loongarch64/loongarch/')
-VMLINUX := ../vmlinux/$(ARCH)/vmlinux.h
+# vmlinux.h: auto-generated from running kernel's BTF, with checked-in fallback
+VMLINUX_GEN      := $(OUTPUT)/vmlinux.h
+VMLINUX_FALLBACK := ../vmlinux/$(ARCH)/vmlinux.h
+VMLINUX          := $(VMLINUX_GEN)
 
 # Includes
 INCLUDES := -I$(OUTPUT) -I../libbpf/include/uapi -I$(dir $(VMLINUX))
@@ -28,7 +31,7 @@ ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS)
 # ============================================================================
 
 # BPF-based tools (have both .bpf.c and .c files)
-BPF_APPS = pidhide textreplace ioctl_spoof netlink_spoof dmi_spoof meminfo_spoof cpuinfo_spoof modules_hide pci_spoof
+BPF_APPS = pidhide textreplace ioctl_spoof netlink_spoof dmi_spoof meminfo_spoof cpuinfo_spoof modules_hide pci_spoof devicetree_spoof fshide uptime_spoof cpucount_spoof kmsg_spoof pathdeny
 
 # Pure userspace CLI (no BPF code)
 CLI_APPS = nogitsune
@@ -36,10 +39,10 @@ CLI_APPS = nogitsune
 # All applications
 APPS = $(BPF_APPS) $(CLI_APPS)
 
-# Helper binaries
-HELPERS = hijackee
-
 # ============================================================================
+
+# Debug flag: make NOGITSUNE_DEBUG=1 for verbose BPF trace output
+NOGITSUNE_DEBUG ?= 0
 
 CLANG_BPF_SYS_INCLUDES ?= $(shell $(CLANG) -v -E - </dev/null 2>&1 \
 	| sed -n '/<...> search starts here:/,/End of search list./{ s| \(/.*\)|-idirafter \1|p }')
@@ -66,7 +69,7 @@ $(call allow-override,CC,$(CROSS_COMPILE)cc)
 $(call allow-override,LD,$(CROSS_COMPILE)ld)
 
 .PHONY: all
-all: $(APPS) $(HELPERS)
+all: $(APPS)
 	@echo ""
 	@echo "╔═══════════════════════════════════════════════════════════╗"
 	@echo "║         野狐 Nogitsune - Build Complete!                  ║"
@@ -78,14 +81,38 @@ all: $(APPS) $(HELPERS)
 	@echo "║    sudo ./nogitsune status       # Show current values    ║"
 	@echo "╚═══════════════════════════════════════════════════════════╝"
 
+.PHONY: test-arch
+test-arch:
+	@echo "Architecture: $(ARCH)"
+	@echo "Kernel: $$(uname -r)"
+	@if [ -f /sys/kernel/btf/vmlinux ]; then \
+		echo "[✓] BTF available — full CO-RE support"; \
+	else \
+		echo "[!] BTF not available — will use checked-in fallback vmlinux.h"; \
+	fi
+	@echo "[✓] Ready for cross-arch compilation"
+
 .PHONY: clean
 clean:
 	$(call msg,CLEAN)
-	$(Q)rm -rf $(OUTPUT) $(APPS) $(HELPERS)
+	$(Q)rm -rf $(OUTPUT) $(APPS)
 
 $(OUTPUT) $(OUTPUT)/libbpf $(BPFTOOL_OUTPUT):
 	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
+
+# Generate vmlinux.h from running kernel's BTF, fall back to checked-in copy
+$(VMLINUX_GEN): | $(OUTPUT) $(BPFTOOL)
+	$(Q)if $(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $@.tmp 2>/dev/null; then \
+		mv $@.tmp $@; \
+		printf '  %-8s %s %s\n' VMLINUX "$(patsubst $(abspath $(OUTPUT))/%,%,$@)" "[✓] from running kernel (CO-RE)"; \
+	elif [ -f $(VMLINUX_FALLBACK) ]; then \
+		cp $(VMLINUX_FALLBACK) $@; \
+		printf '  %-8s %s %s\n' VMLINUX "$(patsubst $(abspath $(OUTPUT))/%,%,$@)" "[!] BTF missing, using checked-in fallback"; \
+	else \
+		echo "  [✗] BTF unavailable and no fallback vmlinux.h — cannot build"; \
+		exit 1; \
+	fi
 
 # Build libbpf
 $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPUT)/libbpf
@@ -104,6 +131,7 @@ $(BPFTOOL): | $(BPFTOOL_OUTPUT)
 $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) $(wildcard %.h) $(VMLINUX) | $(OUTPUT) $(BPFTOOL)
 	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)		      \
+		     -DNOGITSUNE_DEBUG=$(NOGITSUNE_DEBUG)			      \
 		     $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES)		      \
 		     -c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
@@ -128,20 +156,19 @@ $(BPF_APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
 # ============================================================================
 # NOGITSUNE CLI - Pure userspace, no BPF
 # ============================================================================
-$(OUTPUT)/nogitsune.o: nogitsune.c $(wildcard *.h) | $(OUTPUT)
+$(OUTPUT)/nogitsune.o: nogitsune.c cJSON.h $(wildcard *.h) | $(OUTPUT)
 	$(call msg,CC,$@)
 	$(Q)$(CC) $(CFLAGS) -c $< -o $@
 
-nogitsune: $(OUTPUT)/nogitsune.o
+$(OUTPUT)/cJSON.o: cJSON.c cJSON.h | $(OUTPUT)
+	$(call msg,CC,$@)
+	$(Q)$(CC) $(CFLAGS) -c $< -o $@
+
+nogitsune: $(OUTPUT)/nogitsune.o $(OUTPUT)/cJSON.o
 	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $^ -o $@
+	$(Q)$(CC) $(CFLAGS) $^ -lm -o $@
 
 # ============================================================================
-
-# Build helpers
-$(HELPERS):
-	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $@.c -o $@
 
 # Install to /usr/local/bin
 .PHONY: install

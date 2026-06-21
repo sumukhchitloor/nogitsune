@@ -70,22 +70,6 @@ else
         end
 end
 
-target("bpfdos")
-    set_kind("binary")
-    add_files("bpfdos.c", "bpfdos.bpf.c")
-    add_packages("linux-headers")
-    if not has_config("system-libbpf") then
-        add_deps("libbpf")
-    end
-
-target("exechijack")
-    set_kind("binary")
-    add_files("exechijack.c", "exechijack.bpf.c")
-    add_packages("linux-headers")
-    if not has_config("system-libbpf") then
-        add_deps("libbpf")
-    end
-    
 target("pidhide")
     set_kind("binary")
     add_files("pidhide.c", "pidhide.bpf.c")
@@ -94,33 +78,9 @@ target("pidhide")
         add_deps("libbpf")
     end
 
-target("sudoadd")
-    set_kind("binary")
-    add_files("sudoadd.c", "sudoadd.bpf.c")
-    add_packages("linux-headers")
-    if not has_config("system-libbpf") then
-        add_deps("libbpf")
-    end
-
 target("textreplace")
     set_kind("binary")
     add_files("textreplace.c", "textreplace.bpf.c")
-    add_packages("linux-headers")
-    if not has_config("system-libbpf") then
-        add_deps("libbpf")
-    end
-
-target("textreplace2")
-    set_kind("binary")
-    add_files("textreplace2.c", "textreplace2.bpf.c")
-    add_packages("linux-headers")
-    if not has_config("system-libbpf") then
-        add_deps("libbpf")
-    end
-
-target("writeblocker")
-    set_kind("binary")
-    add_files("writeblocker.c", "writeblocker.bpf.c")
     add_packages("linux-headers")
     if not has_config("system-libbpf") then
         add_deps("libbpf")

@@ -17,8 +17,20 @@
  #include <bpf/bpf_core_read.h>
  
  char LICENSE[] SEC("license") = "GPL";
+
+#if NOGITSUNE_DEBUG
+#define log_bpf(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define log_bpf(fmt, ...)
+#endif
  
- #define MAX_BUF_SIZE 512
+ /* Bumped from 512: also covers /sys/firmware/dmi/tables/DMI (the raw SMBIOS
+  * binary table dmidecode reads directly, bypassing /sys/class/dmi/id/<attr> -
+  * see file_idx 14 below), which runs 1-4KB rather than modalias/uevent's
+  * few hundred bytes. bpf_loop() verifies its callback once regardless of
+  * iteration count, so this is just a bigger scan window, not new
+  * architecture - re-verified with NOGITSUNE_DEBUG=1 after this change. */
+ #define MAX_BUF_SIZE 4096
  
  /* ============ MAPS ============ */
  
@@ -57,6 +69,12 @@
   *  11 = board_version
   *  12 = modalias (complex - multi-pattern)
   *  13 = uevent (complex - multi-pattern)
+  *  14 = /sys/firmware/dmi/tables/DMI - raw SMBIOS binary table (complex -
+  *       multi-pattern; same scanner as 12/13, since SMBIOS strings are
+  *       plain NUL-terminated ASCII embedded in the binary table - this is
+  *       a different path family from /sys/class/dmi/id/<attr>, checked
+  *       independently of is_dmi_path() below since it doesn't contain
+  *       "dmi/id/")
   */
  
  /* Fake values for simple files */
@@ -73,15 +91,7 @@
  const volatile char fake10[32] = "1.0\n";
  const volatile char fake11[32] = "1.2\n";
  
- /* ============ HELPERS ============ */
- 
- static __always_inline int str_eq(const char *a, const volatile char *b, int len) {
-     for (int i = 0; i < len && i < 64; i++) {
-         if (a[i] != b[i]) return 0;
-         if (a[i] == '\0') return 1;
-     }
-     return 1;
- }
+/* ============ HELPERS ============ */
  
  /*
   * Check if filename ends with a specific suffix
@@ -122,15 +132,6 @@
          }
      }
      return 0;
- }
- 
- static __always_inline int str_len(const volatile char *s) {
-     int len = 0;
-     for (int i = 0; i < 32; i++) {
-         if (s[i] == '\0' || s[i] == '\n') return len + 1;
-         len++;
-     }
-     return len;
  }
  
  /* ============ MODALIAS/UEVENT SCANNER ============ */
@@ -216,32 +217,37 @@
      char filename[64];
      if (bpf_probe_read_user(filename, sizeof(filename), (void *)ctx->args[1]) < 0)
          return 0;
-     
-     /* First check if this is a DMI path at all */
-     if (!is_dmi_path(filename))
-         return 0;
-     
+
      int file_idx = -1;
-     
-     /* Match by filename suffix - works for both:
-      * /sys/class/dmi/id/sys_vendor
-      * /sys/devices/virtual/dmi/id/sys_vendor
-      */
-     if (str_ends_with(filename, "sys_vendor", 10)) file_idx = 0;
-     else if (str_ends_with(filename, "product_name", 12)) file_idx = 1;
-     else if (str_ends_with(filename, "bios_vendor", 11)) file_idx = 2;
-     else if (str_ends_with(filename, "board_vendor", 12)) file_idx = 3;
-     else if (str_ends_with(filename, "chassis_vendor", 14)) file_idx = 4;
-     else if (str_ends_with(filename, "bios_version", 12)) file_idx = 5;
-     else if (str_ends_with(filename, "bios_date", 9)) file_idx = 6;
-     else if (str_ends_with(filename, "board_name", 10)) file_idx = 7;
-     else if (str_ends_with(filename, "product_family", 14)) file_idx = 8;
-     else if (str_ends_with(filename, "chassis_type", 12)) file_idx = 9;
-     else if (str_ends_with(filename, "product_version", 15)) file_idx = 10;
-     else if (str_ends_with(filename, "board_version", 13)) file_idx = 11;
-     else if (str_ends_with(filename, "modalias", 8)) file_idx = 12;
-     else if (str_ends_with(filename, "uevent", 6)) file_idx = 13;
-     
+
+     /* Raw SMBIOS binary table - a separate path family from
+      * /sys/class/dmi/id/<attr>, checked independently of is_dmi_path() since it
+      * doesn't contain "dmi/id/" at all. */
+     if (str_ends_with(filename, "dmi/tables/DMI", 14)) {
+         file_idx = 14;
+     }
+     /* Otherwise, only proceed if this is a DMI path at all */
+     else if (is_dmi_path(filename)) {
+         /* Match by filename suffix - works for both:
+          * /sys/class/dmi/id/sys_vendor
+          * /sys/devices/virtual/dmi/id/sys_vendor
+          */
+         if (str_ends_with(filename, "sys_vendor", 10)) file_idx = 0;
+         else if (str_ends_with(filename, "product_name", 12)) file_idx = 1;
+         else if (str_ends_with(filename, "bios_vendor", 11)) file_idx = 2;
+         else if (str_ends_with(filename, "board_vendor", 12)) file_idx = 3;
+         else if (str_ends_with(filename, "chassis_vendor", 14)) file_idx = 4;
+         else if (str_ends_with(filename, "bios_version", 12)) file_idx = 5;
+         else if (str_ends_with(filename, "bios_date", 9)) file_idx = 6;
+         else if (str_ends_with(filename, "board_name", 10)) file_idx = 7;
+         else if (str_ends_with(filename, "product_family", 14)) file_idx = 8;
+         else if (str_ends_with(filename, "chassis_type", 12)) file_idx = 9;
+         else if (str_ends_with(filename, "product_version", 15)) file_idx = 10;
+         else if (str_ends_with(filename, "board_version", 13)) file_idx = 11;
+         else if (str_ends_with(filename, "modalias", 8)) file_idx = 12;
+         else if (str_ends_with(filename, "uevent", 6)) file_idx = 13;
+     }
+
      if (file_idx >= 0) {
          u64 pid_tgid = bpf_get_current_pid_tgid();
          bpf_map_update_elem(&map_file_idx, &pid_tgid, &file_idx, BPF_ANY);
@@ -284,25 +290,33 @@
      
      int file_idx = *pfile_idx;
      char *buf = (char *)*pbuf;
-     
+
+     /* Fixed-width overwrite: write up to the full 32-byte rodata width, but
+      * never more than was actually read. fakeN is NUL-padded in userspace
+      * past the configured value, so every byte in [0, wlen) is
+      * deterministically replaced regardless of how short the configured
+      * replacement is relative to the real string it's covering up. */
+     unsigned int wlen = (ret > 32) ? 32 : (unsigned int)ret;
+
      /* Simple file replacements (0-11) */
      switch (file_idx) {
-         case 0:  bpf_probe_write_user(buf, (void *)fake0, str_len(fake0)); break;
-         case 1:  bpf_probe_write_user(buf, (void *)fake1, str_len(fake1)); break;
-         case 2:  bpf_probe_write_user(buf, (void *)fake2, str_len(fake2)); break;
-         case 3:  bpf_probe_write_user(buf, (void *)fake3, str_len(fake3)); break;
-         case 4:  bpf_probe_write_user(buf, (void *)fake4, str_len(fake4)); break;
-         case 5:  bpf_probe_write_user(buf, (void *)fake5, str_len(fake5)); break;
-         case 6:  bpf_probe_write_user(buf, (void *)fake6, str_len(fake6)); break;
-         case 7:  bpf_probe_write_user(buf, (void *)fake7, str_len(fake7)); break;
-         case 8:  bpf_probe_write_user(buf, (void *)fake8, str_len(fake8)); break;
-         case 9:  bpf_probe_write_user(buf, (void *)fake9, str_len(fake9)); break;
-         case 10: bpf_probe_write_user(buf, (void *)fake10, str_len(fake10)); break;
-         case 11: bpf_probe_write_user(buf, (void *)fake11, str_len(fake11)); break;
+         case 0:  bpf_probe_write_user(buf, (void *)fake0, wlen); break;
+         case 1:  bpf_probe_write_user(buf, (void *)fake1, wlen); break;
+         case 2:  bpf_probe_write_user(buf, (void *)fake2, wlen); break;
+         case 3:  bpf_probe_write_user(buf, (void *)fake3, wlen); break;
+         case 4:  bpf_probe_write_user(buf, (void *)fake4, wlen); break;
+         case 5:  bpf_probe_write_user(buf, (void *)fake5, wlen); break;
+         case 6:  bpf_probe_write_user(buf, (void *)fake6, wlen); break;
+         case 7:  bpf_probe_write_user(buf, (void *)fake7, wlen); break;
+         case 8:  bpf_probe_write_user(buf, (void *)fake8, wlen); break;
+         case 9:  bpf_probe_write_user(buf, (void *)fake9, wlen); break;
+         case 10: bpf_probe_write_user(buf, (void *)fake10, wlen); break;
+         case 11: bpf_probe_write_user(buf, (void *)fake11, wlen); break;
          
-         /* modalias and uevent - need multi-pattern scan */
+         /* modalias, uevent, and the raw SMBIOS table - need multi-pattern scan */
          case 12:
-         case 13: {
+         case 13:
+         case 14: {
              int len = ret;
              if (len > MAX_BUF_SIZE)
                  len = MAX_BUF_SIZE;
@@ -316,7 +330,7 @@
              bpf_loop(len, modalias_scan_callback, &sc, 0);
              
              if (sc.count > 0) {
-                 bpf_printk("[DMI] modalias/uevent: replaced %d patterns", sc.count);
+                 log_bpf("[DMI] modalias/uevent: replaced %d patterns", sc.count);
              }
              break;
          }

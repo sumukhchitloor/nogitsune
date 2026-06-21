@@ -23,12 +23,30 @@
  #include <bpf/bpf_core_read.h>
  
  char LICENSE[] SEC("license") = "GPL";
+
+#if NOGITSUNE_DEBUG
+#define log_bpf(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define log_bpf(fmt, ...)
+#endif
  
- /* Configuration - can be changed via maps if needed */
  #define MAX_BUF_SIZE 4096
- #define SPOOF_CORES "8"
- #define SPOOF_MICROCODE "0x000000b4"
- 
+
+ /* Replacement digit for "cpu cores"/"siblings" counts (single ASCII digit
+  * '1'-'9' only - the original code only ever overwrites 1 byte, so
+  * multi-digit core counts aren't supported; validated at the CLI layer). */
+ const volatile char target_cores = '8';
+
+ /* Whether to blank out the "hypervisor " flag from /proc/cpuinfo's flags
+  * line. Defaults to true (today's behavior). */
+ const volatile bool strip_hypervisor = true;
+
+ /* Replacement microcode signature. Must always be exactly 10 bytes
+  * ("0x" + 8 hex digits), same width as the "0xffffffff" pattern it
+  * replaces - this is a fixed-length swap, not subject to the
+  * variable-length write issue DMI/meminfo have. */
+ const volatile char target_microcode[11] = "0x000000b4";
+
  /* Track which PIDs are reading cpuinfo */
  struct {
      __uint(type, BPF_MAP_TYPE_HASH);
@@ -101,69 +119,67 @@
      
      /*
       * Pattern 1: "hypervisor " (11 bytes)
-      * Replace with 11 spaces to remove from flags
+      * Replace with 11 spaces to remove from flags (unless disabled)
       */
-     if (chunk[0] == 'h' && chunk[1] == 'y' && chunk[2] == 'p' && 
+     if (strip_hypervisor &&
+         chunk[0] == 'h' && chunk[1] == 'y' && chunk[2] == 'p' &&
          chunk[3] == 'e' && chunk[4] == 'r' && chunk[5] == 'v' &&
-         chunk[6] == 'i' && chunk[7] == 's' && chunk[8] == 'o' && 
+         chunk[6] == 'i' && chunk[7] == 's' && chunk[8] == 'o' &&
          chunk[9] == 'r' && chunk[10] == ' ') {
-         
+
          char spaces[12] = "           ";  /* 11 spaces */
          bpf_probe_write_user(sc->user_buf + index, spaces, 11);
          sc->replaced_count++;
          return 0;  /* Continue scanning for more */
      }
-     
+
      /*
       * Pattern 2: "cpu cores\t: " (12 bytes) followed by digit
-      * Replace the digit with '8'
+      * Replace the digit with target_cores
       */
-     if (chunk[0] == 'c' && chunk[1] == 'p' && chunk[2] == 'u' && 
+     if (chunk[0] == 'c' && chunk[1] == 'p' && chunk[2] == 'u' &&
          chunk[3] == ' ' && chunk[4] == 'c' && chunk[5] == 'o' &&
-         chunk[6] == 'r' && chunk[7] == 'e' && chunk[8] == 's' && 
+         chunk[6] == 'r' && chunk[7] == 'e' && chunk[8] == 's' &&
          chunk[9] == '\t' && chunk[10] == ':' && chunk[11] == ' ') {
-         
+
          /* Check the digit is in range '1'-'9' or multi-digit */
          if (chunk[12] >= '0' && chunk[12] <= '9') {
-             char eight = '8';
-             bpf_probe_write_user(sc->user_buf + index + 12, &eight, 1);
+             bpf_probe_write_user(sc->user_buf + index + 12, (void *)&target_cores, 1);
              sc->replaced_count++;
          }
          return 0;
      }
-     
+
      /*
       * Pattern 3: "siblings\t: " (11 bytes) followed by digit
-      * Replace the digit with '8'
+      * Replace the digit with target_cores
       */
-     if (chunk[0] == 's' && chunk[1] == 'i' && chunk[2] == 'b' && 
+     if (chunk[0] == 's' && chunk[1] == 'i' && chunk[2] == 'b' &&
          chunk[3] == 'l' && chunk[4] == 'i' && chunk[5] == 'n' &&
-         chunk[6] == 'g' && chunk[7] == 's' && chunk[8] == '\t' && 
+         chunk[6] == 'g' && chunk[7] == 's' && chunk[8] == '\t' &&
          chunk[9] == ':' && chunk[10] == ' ') {
-         
+
          if (chunk[11] >= '0' && chunk[11] <= '9') {
-             char eight = '8';
-             bpf_probe_write_user(sc->user_buf + index + 11, &eight, 1);
+             bpf_probe_write_user(sc->user_buf + index + 11, (void *)&target_cores, 1);
              sc->replaced_count++;
          }
          return 0;
      }
-     
+
      /*
       * Pattern 4: "0xffffffff" (10 bytes) - microcode signature
-      * Replace with "0x000000b4"
+      * Replace with target_microcode
       */
-     if (chunk[0] == '0' && chunk[1] == 'x' && chunk[2] == 'f' && 
+     if (chunk[0] == '0' && chunk[1] == 'x' && chunk[2] == 'f' &&
          chunk[3] == 'f' && chunk[4] == 'f' && chunk[5] == 'f' &&
-         chunk[6] == 'f' && chunk[7] == 'f' && chunk[8] == 'f' && 
+         chunk[6] == 'f' && chunk[7] == 'f' && chunk[8] == 'f' &&
          chunk[9] == 'f') {
-         
-         char mc[10] = "0x000000b4";
-         bpf_probe_write_user(sc->user_buf + index, mc, 10);
+
+         bpf_probe_write_user(sc->user_buf + index, (void *)target_microcode, 10);
          sc->replaced_count++;
          return 0;
      }
-     
+
      return 0;  /* Continue scanning */
  }
  
@@ -241,7 +257,7 @@
      
      /* Optional: log how many replacements we made */
      if (sc.replaced_count > 0) {
-         bpf_printk("cpuinfo_spoof: made %d replacements", sc.replaced_count);
+          log_bpf("cpuinfo_spoof: made %d replacements", sc.replaced_count);
      }
      
      return 0;

