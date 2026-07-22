@@ -22,7 +22,7 @@
 #define MAX_EXPLICIT_PIDS 16
 #define MAX_DYNAMIC_PIDS 32
 #define MAX_PID_LEN 10
-#define MAX_PROC_NAMES 8
+#define MAX_PROC_NAMES 32
 #define MAX_PROC_NAME_LEN 64
 
 // Setup Argument stuff
@@ -325,6 +325,7 @@ int main(int argc, char **argv)
     }
 
     skel->rodata->target_ppid = env.target_ppid;
+    skel->rodata->self_pid = getpid();
 
     err = pidhide_bpf__load(skel);
     if (err) {

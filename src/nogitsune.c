@@ -1181,44 +1181,61 @@ static int launch_pidhide_stealth(void)
 
     printf(BCYAN "  [*] Engaging stealth mode...\n" RESET);
 
+    /* Capture sudo's PID NOW, before fork - after fork getppid() in the
+     * child would return nogitsune's PID (the fork parent), not sudo's. */
+    pid_t sudo_pid = getppid();
+
     pid_t pid = fork();
     if (pid == 0) {
-        /* Build command with all process names to hide */
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd), "%s", ph_path);
+        /* Build argv[] for pidhide directly - no 'sh -c' wrapper so there's
+         * no intermediate sh process visible in ps. */
+        char *argv[128];
+        int argc = 0;
+        char added_names[32][32];
+        int num_added = 0;
+        char ppid_str[16];
+        static const char *guest_addition_names[] = {
+            "VBoxService", "VBoxClient", "VBoxControl", "VBoxDRMClient",
+        };
 
-         /* Hide all running spoofers */
-         for (int i = 0; spoofers[i].name != NULL; i++) {
-             if (spoofers[i].pid > 0) {
-                 const char *name = spoofers[i].binary;
-                 if (strncmp(name, "./", 2) == 0) name += 2;
+        argv[argc++] = ph_path;
 
-                 strcat(cmd, " -n ");
-                 strcat(cmd, name);
-             }
-         }
+        /* Deduplicated spoofer names (textreplace appears 3x in array) */
+        for (int i = 0; spoofers[i].name != NULL && argc < 120; i++) {
+            if (spoofers[i].pid <= 0) continue;
+            const char *name = spoofers[i].binary;
+            if (strncmp(name, "./", 2) == 0) name += 2;
+            int dup = 0;
+            for (int j = 0; j < num_added; j++) {
+                if (strcmp(added_names[j], name) == 0) { dup = 1; break; }
+            }
+            if (dup) continue;
+            if (num_added < 32) strncpy(added_names[num_added++], name, 31);
+            argv[argc++] = "-n";
+            argv[argc++] = added_names[num_added - 1];
+        }
 
-         /* Also auto-hide known Guest-Additions noise processes (confirmed
-          * via live testing to be running unhidden on a real VirtualBox
-          * guest: VBoxService + several paired VBoxClient instances) - the
-          * user doesn't have to know to enumerate these themselves every
-          * time. pidhide re-resolves -n entries periodically, so this
-          * survives them crashing/respawning with a new PID. */
-         static const char *guest_addition_names[] = {
-             "VBoxService", "VBoxClient", "VBoxControl", "VBoxDRMClient",
-         };
-         for (size_t i = 0; i < sizeof(guest_addition_names) / sizeof(guest_addition_names[0]); i++) {
-             strcat(cmd, " -n ");
-             strcat(cmd, guest_addition_names[i]);
-         }
+        /* Guest Additions processes */
+        for (size_t i = 0; i < sizeof(guest_addition_names)/sizeof(guest_addition_names[0]) && argc < 120; i++) {
+            argv[argc++] = "-n";
+            argv[argc++] = (char *)guest_addition_names[i];
+        }
 
-         /* Also hide pidhide and nogitsune */
-         strcat(cmd, " -n pidhide -n nogitsune -s");
+        /* sudo parent by explicit PID (sudo_pid captured before fork) */
+        snprintf(ppid_str, sizeof(ppid_str), "%d", (int)sudo_pid);
+        argv[argc++] = "-p";
+        argv[argc++] = ppid_str;
 
-         freopen("/dev/null", "w", stdout);
-         freopen("/dev/null", "w", stderr);
-         execl("/bin/sh", "sh", "-c", cmd, NULL);
-         exit(1);
+        /* pidhide and nogitsune by name, plus hide self */
+        argv[argc++] = "-n"; argv[argc++] = "pidhide";
+        argv[argc++] = "-n"; argv[argc++] = "nogitsune";
+        argv[argc++] = "-s";
+        argv[argc] = NULL;
+
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+        execv(ph_path, argv);
+        exit(1);
      } else if (pid > 0) {
          g_pidhide_pid = pid;
          usleep(150000);  /* 150ms for pidhide to load */

