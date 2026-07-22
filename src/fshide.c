@@ -81,6 +81,9 @@ static const char *default_names[] = {
     "VBoxGuestAdditions", "vboxadd", "vboxguest.ko", "vboxsf.ko",
     "vboxvideo.ko", "vboxguest", "mount.vboxsf", "VBoxService",
     "VBoxClient", "VBoxControl", "VBoxDRMClient",
+    /* Prefix match: the rcvboxadd and vbox-uninstall families do not begin
+     * with a vbox/VBox prefix, so they need their own entries. */
+    "rcvboxadd", "vbox-uninstall",
 };
 
 static int handle_event(void *ctx, void *data, size_t data_sz)

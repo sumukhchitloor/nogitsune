@@ -134,10 +134,13 @@
       "Disk model spoofing",              "/sys/class/block/*/device/model",
       SPOOF_TYPE_TEXTREPLACE, true, 0},
 
-     /* Kernel modules - Hide vbox modules (optional) */
+     /* Kernel modules - Hide vbox modules. Enabled by default so a plain
+      * 'spoof' (and 'spoof --stealth') covers /proc/modules without an
+      * extra flag; --modules is only needed to add it to a --<technique>
+      * restricted run. */
      {"modules",         "./modules_hide", NULL,
       "Kernel module hiding",             "/proc/modules",
-      SPOOF_TYPE_BPF, false, 0},  /* Disabled by default */
+      SPOOF_TYPE_BPF, true, 0},  /* Enabled by default */
 
      /* Guest-Additions artifact hiding - directory-listing (fshide) and
       * direct-path (pathdeny) coverage are complementary, grouped under
@@ -704,6 +707,10 @@ static char g_exe_dir[512] = ".";
          "VBoxGuestAdditions", "vboxadd", "vboxguest.ko", "vboxsf.ko",
          "vboxvideo.ko", "vboxguest", "mount.vboxsf", "VBoxService",
          "VBoxClient", "VBoxControl", "VBoxDRMClient",
+         /* rcvboxadd/rcvboxadd-service and vbox-uninstall-guest-additions
+          * don't start with the "vbox"/"VBox" prefixes above - fshide's
+          * match is a prefix, so they need their own entries. */
+         "rcvboxadd", "vbox-uninstall",
      };
      p->num_hidden_files = sizeof(def_hidden_files) / sizeof(def_hidden_files[0]);
      for (int i = 0; i < p->num_hidden_files; i++)
@@ -716,6 +723,7 @@ static char g_exe_dir[512] = ".";
      static const char *def_hidden_paths[] = {
          "/usr/sbin/VBoxService", "/usr/bin/VBoxClient",
          "/usr/bin/VBoxControl", "/usr/sbin/mount.vboxsf",
+         "/usr/bin/VBoxDRMClient",
      };
      p->num_hidden_paths = sizeof(def_hidden_paths) / sizeof(def_hidden_paths[0]);
      for (int i = 0; i < p->num_hidden_paths; i++)
@@ -1261,7 +1269,7 @@ static int launch_pidhide_stealth(void)
      printf("    --mem              /proc/meminfo only\n");
      printf("    --pci              PCI vendor/device IDs only\n");
      printf("    --disk             Disk model only\n");
-     printf("    --modules          Also hide kernel modules (off by default even with --all)\n");
+     printf("    --modules          Add kernel-module hiding to a --<technique> restricted run (on by default otherwise)\n");
      printf("    --artifacts        Guest Additions artifact hiding only (fshide + pathdeny)\n");
      printf("    --uptime           /proc/uptime only\n");
      printf("    --cpucount         sched_getaffinity CPU count only\n");
